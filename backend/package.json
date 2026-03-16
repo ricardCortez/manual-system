@@ -50,6 +50,7 @@
     "node-cron": "^3.0.3",
     "openai": "^4.52.0",
     "pdf-parse": "^1.1.1",
+    "pino-pretty": "^11.0.0",
     "sharp": "^0.33.4",
     "socket.io": "^4.7.5",
     "uuid": "^10.0.0",
