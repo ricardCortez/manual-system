@@ -1,0 +1,55 @@
+version: "3.9"
+
+# Perfil separado para Ollama con soporte GPU opcional
+# Uso: docker compose -f docker-compose.yml -f ai-service/ollama/docker-compose.ollama.yml up -d
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: manuals_ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    environment:
+      OLLAMA_NUM_PARALLEL: 2
+      OLLAMA_MAX_LOADED_MODELS: 2
+    networks:
+      - manuals_net
+
+    # ── GPU NVIDIA (descomenta si tienes GPU) ────────
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # Job de inicialización: descarga modelos al primer arranque
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: manuals_ollama_init
+    entrypoint: >
+      sh -c "
+        sleep 10 &&
+        ollama pull llama3.1:8b &&
+        ollama pull mistral:7b &&
+        echo 'Modelos descargados correctamente'
+      "
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    depends_on:
+      - ollama
+    networks:
+      - manuals_net
+    restart: "no"
+
+volumes:
+  ollama_data:
+    external: true
+
+networks:
+  manuals_net:
+    external: true

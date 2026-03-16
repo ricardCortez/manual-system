@@ -1,0 +1,33 @@
+version: "3.9"
+
+# Producción: sin puertos expuestos directamente (todo por Nginx)
+# Uso: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  nginx:
+    ports:
+      - "80:80"
+      - "443:443"
+
+  backend:
+    build:
+      target: production
+    environment:
+      NODE_ENV: production
+    ports: []        # Solo accesible por la red interna Docker
+
+  frontend:
+    build:
+      target: production
+    ports: []        # Nginx sirve los estáticos
+
+  postgres:
+    ports: []        # Solo accesible internamente
+
+  redis:
+    ports: []        # Solo accesible internamente
+
+  meilisearch:
+    environment:
+      MEILI_ENV: production
+    ports: []        # Solo accesible internamente

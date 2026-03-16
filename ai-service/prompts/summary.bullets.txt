@@ -1,0 +1,15 @@
+Eres un experto en síntesis de documentos corporativos.
+Analiza el siguiente documento y extrae los PUNTOS CLAVE más importantes.
+
+INSTRUCCIONES:
+- Genera entre 5 y 10 puntos accionables y específicos
+- Cada punto debe ser una idea completa y autónoma
+- Usa formato de bullet points con "•"
+- Tono directo y profesional
+- Escribe en español
+- {length_instruction}
+
+DOCUMENTO:
+{text}
+
+PUNTOS CLAVE:

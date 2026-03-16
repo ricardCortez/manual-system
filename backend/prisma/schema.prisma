@@ -1,0 +1,801 @@
+// ═══════════════════════════════════════════════════════
+// MANUAL SYSTEM — Prisma Schema
+// PostgreSQL 16 + Prisma ORM 5
+// ═══════════════════════════════════════════════════════
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["fullTextSearch", "postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgcrypto, pg_trgm]
+}
+
+// ──────────────────────────────────────────────────────
+// ENUMS
+// ──────────────────────────────────────────────────────
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN_AREA
+  EDITOR
+  REVISOR
+  VISUALIZADOR
+}
+
+enum DocumentType {
+  DOCUMENT         // Solo documento escrito (Tipo A)
+  VIDEO            // Solo video (Tipo B)
+  DOCUMENT_VIDEO   // Doc + video complementario (Tipo C)
+  MULTIMEDIA       // Manual multimedia TipTap (Tipo D)
+}
+
+enum DocumentStatus {
+  BORRADOR
+  EN_REVISION
+  APROBADO
+  PUBLICADO
+  OBSOLETO
+}
+
+enum ConfidentialityLevel {
+  PUBLICO
+  RESTRINGIDO
+  CRITICO
+}
+
+enum FileType {
+  PDF
+  DOCX
+  XLSX
+  PPTX
+  MD
+  PNG
+  JPG
+  WEBP
+  VIDEO
+  TIPTAP_JSON
+}
+
+enum VideoProcessingStatus {
+  PENDING
+  UPLOADING
+  VALIDATING
+  ENCODING
+  GENERATING_HLS
+  EXTRACTING_AUDIO
+  TRANSCRIBING
+  INDEXING
+  COMPLETED
+  FAILED
+}
+
+enum ApprovalStepStatus {
+  PENDING
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  SKIPPED
+}
+
+enum ApprovalFlowStatus {
+  PENDING
+  IN_PROGRESS
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum NotificationType {
+  NEW_DOCUMENT_PUBLISHED
+  DOCUMENT_UPDATED_FAVORITES
+  DOCUMENT_EXPIRING_SOON
+  DOCUMENT_ASSIGNED_REVIEW
+  APPROVAL_FLOW_COMPLETED
+  VIDEO_PROCESSING_COMPLETE
+  BULK_IMPORT_COMPLETE
+  AI_SUMMARY_READY
+  WEEKLY_DIGEST
+}
+
+enum AISummaryType {
+  EXECUTIVE
+  BULLETS
+  BRIEF
+  GLOSSARY
+  COMPARATIVE
+}
+
+enum AISummaryLength {
+  SHORT
+  MEDIUM
+  DETAILED
+}
+
+enum AIJobStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+}
+
+enum AuditAction {
+  // Auth
+  LOGIN
+  LOGOUT
+  LOGIN_FAILED
+  PASSWORD_CHANGED
+  TOKEN_REFRESHED
+  // Documents
+  DOCUMENT_CREATED
+  DOCUMENT_UPDATED
+  DOCUMENT_DELETED
+  DOCUMENT_VIEWED
+  DOCUMENT_DOWNLOADED
+  DOCUMENT_PRINTED
+  DOCUMENT_VERSION_UPLOADED
+  DOCUMENT_STATUS_CHANGED
+  DOCUMENT_PUBLISHED
+  DOCUMENT_OBSOLETED
+  // Videos
+  VIDEO_UPLOADED
+  VIDEO_VIEWED
+  // Approval
+  APPROVAL_SUBMITTED
+  APPROVAL_APPROVED
+  APPROVAL_REJECTED
+  // AI
+  AI_SUMMARY_GENERATED
+  AI_CHAT_SESSION_STARTED
+  // Admin
+  USER_CREATED
+  USER_UPDATED
+  USER_DEACTIVATED
+  AREA_CREATED
+  PERMISSION_GRANTED
+  PERMISSION_REVOKED
+  SYSTEM_CONFIG_CHANGED
+}
+
+enum AIProvider {
+  OLLAMA
+  OPENAI
+  ANTHROPIC
+}
+
+enum AIMode {
+  LOCAL
+  EXTERNAL
+  HYBRID
+}
+
+enum TranscriptionEngine {
+  WHISPER_LOCAL
+}
+
+// ──────────────────────────────────────────────────────
+// USUARIOS Y ORGANIZACIÓN
+// ──────────────────────────────────────────────────────
+
+model User {
+  id           String    @id @default(cuid())
+  name         String
+  email        String    @unique
+  passwordHash String
+  role         UserRole  @default(VISUALIZADOR)
+  isActive     Boolean   @default(true)
+  lastLogin    DateTime?
+  loginCount   Int       @default(0)
+
+  // Relaciones organizativas
+  areaId String?
+  area   Area?   @relation(fields: [areaId], references: [id])
+
+  // Perfil
+  avatarUrl String?
+  phone     String?
+  jobTitle  String?
+
+  // Seguridad
+  passwordChangedAt DateTime?
+  failedLoginCount  Int       @default(0)
+  lockedUntil       DateTime?
+
+  // Timestamps
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // Relaciones
+  managedAreas       Area[]                @relation("AreaManager")
+  createdDocuments   Document[]            @relation("DocumentAuthor")
+  documentVersions   DocumentVersion[]
+  accessPermissions  AccessPermission[]
+  approvalSteps      ApprovalStep[]        @relation("StepReviewer")
+  readConfirmations  ReadConfirmation[]
+  auditLogs          AuditLog[]
+  notifications      Notification[]
+  favorites          UserFavorite[]
+  recentDocuments    UserRecentDocument[]
+  aiSummaries        AISummary[]
+  aiChatSessions     AIChatSession[]
+  aiUsageLogs        AIUsageLog[]
+  refreshTokens      RefreshToken[]
+  searchHistory      SearchHistory[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@map("refresh_tokens")
+}
+
+model Area {
+  id          String  @id @default(cuid())
+  name        String
+  code        String  @unique
+  description String?
+  color       String? // HEX para identificación visual
+  isActive    Boolean @default(true)
+
+  // Jerarquía
+  parentId String?
+  parent   Area?    @relation("AreaHierarchy", fields: [parentId], references: [id])
+  children Area[]   @relation("AreaHierarchy")
+
+  // Manager del área
+  managerId String?
+  manager   User?   @relation("AreaManager", fields: [managerId], references: [id])
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relaciones
+  users             User[]
+  documents         Document[]
+  accessPermissions AccessPermission[]
+  approvalConfigs   ApprovalFlowConfig[]
+
+  @@map("areas")
+}
+
+// ──────────────────────────────────────────────────────
+// DOCUMENTOS
+// ──────────────────────────────────────────────────────
+
+model Document {
+  id          String               @id @default(cuid())
+  title       String
+  code        String               @unique // Código interno: PROC-001
+  description String?
+  type        DocumentType
+  status      DocumentStatus       @default(BORRADOR)
+  confidentiality ConfidentialityLevel @default(PUBLICO)
+
+  // Clasificación
+  areaId     String
+  area       Area   @relation(fields: [areaId], references: [id])
+  authorId   String
+  author     User   @relation("DocumentAuthor", fields: [authorId], references: [id])
+
+  // Versión actual
+  currentVersionId String?
+
+  // Metadatos del proceso
+  processName String?
+  subProcess  String?
+
+  // Fechas de ciclo de vida
+  effectiveDate DateTime?
+  expiryDate    DateTime?
+  reviewDate    DateTime?
+
+  // Tags
+  tags String[] // Array de tags
+
+  // Control
+  isDeleted Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // Relaciones
+  versions          DocumentVersion[]
+  meta              DocumentMeta?
+  accessPermissions AccessPermission[]
+  approvalFlows     ApprovalFlow[]
+  readConfirmations ReadConfirmation[]
+  favorites         UserFavorite[]
+  recentViews       UserRecentDocument[]
+  aiSummaries       AISummary[]
+  aiChatSessions    AIChatSession[]
+  auditLogs         AuditLog[]
+
+  @@index([areaId])
+  @@index([status])
+  @@index([type])
+  @@index([tags])
+  @@map("documents")
+}
+
+model DocumentVersion {
+  id         String   @id @default(cuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  // Versionado semántico
+  versionMajor Int
+  versionMinor Int
+  versionPatch Int
+  versionLabel String  // "1.0.0"
+  changelog    String? // Descripción de cambios
+
+  // Archivo
+  filePath      String
+  fileType      FileType
+  fileSize      Int      // bytes
+  mimeType      String
+  originalName  String
+
+  // Contenido extraído
+  extractedText    String? // Para búsqueda e IA
+  thumbnailPath    String? // Primera página como imagen
+  pageCount        Int?
+
+  // TipTap (para tipo MULTIMEDIA)
+  tiptapContent Json?
+
+  // Control
+  createdById String
+  createdBy   User   @relation(fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+
+  // Relaciones
+  videoAsset        VideoAsset?
+  approvalFlows     ApprovalFlow[]
+  readConfirmations ReadConfirmation[]
+  aiSummaries       AISummary[]
+  aiChatSessions    AIChatSession[]
+  auditLogs         AuditLog[]
+
+  @@unique([documentId, versionMajor, versionMinor, versionPatch])
+  @@index([documentId])
+  @@map("document_versions")
+}
+
+model DocumentMeta {
+  id         String   @id @default(cuid())
+  documentId String   @unique
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  // Metadatos adicionales
+  keywords         String[]
+  relatedDocIds    String[]
+  externalRefs     String?
+  legacyCode       String?   // Código en sistema anterior
+  complianceFramework String? // ISO, OHSAS, etc.
+  revision         String?   // "Rev. A", "Rev. 3"
+
+  updatedAt DateTime @updatedAt
+
+  @@map("document_meta")
+}
+
+// ──────────────────────────────────────────────────────
+// VIDEOS
+// ──────────────────────────────────────────────────────
+
+model VideoAsset {
+  id                String                @id @default(cuid())
+  documentVersionId String                @unique
+  documentVersion   DocumentVersion       @relation(fields: [documentVersionId], references: [id], onDelete: Cascade)
+
+  // Archivo original
+  originalPath    String
+  originalSize    Int // bytes
+  originalFormat  String // mp4, mov, etc.
+
+  // HLS
+  hlsManifestPath String?     // master.m3u8
+  hlsBasePath     String?     // directorio base HLS
+  resolutions     String[]    // ["360p", "720p", "1080p"]
+
+  // Metadatos del video
+  duration        Float?      // segundos
+  width           Int?
+  height          Int?
+  fps             Float?
+  bitrate         Int?
+
+  // Thumbnail
+  thumbnailPath   String?
+
+  // Procesamiento
+  processingStatus   VideoProcessingStatus @default(PENDING)
+  processingProgress Int                   @default(0) // 0-100
+  processingError    String?
+  processingStartAt  DateTime?
+  processingEndAt    DateTime?
+
+  // Control
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relaciones
+  transcript VideoTranscript?
+  chapters   VideoChapter[]
+
+  @@map("video_assets")
+}
+
+model VideoTranscript {
+  id           String  @id @default(cuid())
+  videoAssetId String  @unique
+  videoAsset   VideoAsset @relation(fields: [videoAssetId], references: [id], onDelete: Cascade)
+
+  fullText  String
+  language  String  @default("es")
+  vttPath   String? // archivo .vtt generado
+
+  // Segmentos para búsqueda y sync
+  segments Json // [{ start: float, end: float, text: string }]
+
+  engine    TranscriptionEngine @default(WHISPER_LOCAL)
+  modelUsed String?
+
+  createdAt DateTime @default(now())
+
+  @@map("video_transcripts")
+}
+
+model VideoChapter {
+  id           String     @id @default(cuid())
+  videoAssetId String
+  videoAsset   VideoAsset @relation(fields: [videoAssetId], references: [id], onDelete: Cascade)
+
+  title           String
+  startSeconds    Float
+  endSeconds      Float?
+  description     String?
+  isAutoGenerated Boolean   @default(false)
+
+  createdById String
+  order       Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("video_chapters")
+}
+
+// ──────────────────────────────────────────────────────
+// CONTROL DE ACCESOS
+// ──────────────────────────────────────────────────────
+
+model AccessPermission {
+  id String @id @default(cuid())
+
+  // Sujeto (quién tiene el permiso)
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+  role   UserRole?
+
+  // Objeto (sobre qué aplica)
+  documentId String?
+  document   Document? @relation(fields: [documentId], references: [id])
+  areaId     String?
+  area       Area?     @relation(fields: [areaId], references: [id])
+
+  // Nivel
+  canView     Boolean @default(true)
+  canDownload Boolean @default(false)
+  canPrint    Boolean @default(false)
+  canEdit     Boolean @default(false)
+  isExplicitDeny Boolean @default(false) // Lista negra
+
+  // Control
+  grantedBy  String
+  grantedAt  DateTime @default(now())
+  expiresAt  DateTime?
+
+  @@unique([userId, documentId])
+  @@unique([userId, areaId])
+  @@map("access_permissions")
+}
+
+// ──────────────────────────────────────────────────────
+// FLUJO DE APROBACIÓN
+// ──────────────────────────────────────────────────────
+
+model ApprovalFlowConfig {
+  id     String @id @default(cuid())
+  areaId String
+  area   Area   @relation(fields: [areaId], references: [id])
+
+  name           String
+  isActive       Boolean @default(true)
+  requiresReview Boolean @default(true)
+  parallelReview Boolean @default(false) // true = todos los revisores al mismo tiempo
+  escalationDays Int     @default(5)
+
+  steps Json // [{ order: int, role: UserRole, userId?: string, isRequired: bool }]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  approvalFlows ApprovalFlow[]
+
+  @@map("approval_flow_configs")
+}
+
+model ApprovalFlow {
+  id                String             @id @default(cuid())
+  documentId        String
+  document          Document           @relation(fields: [documentId], references: [id])
+  documentVersionId String
+  documentVersion   DocumentVersion    @relation(fields: [documentVersionId], references: [id])
+  configId          String?
+  config            ApprovalFlowConfig? @relation(fields: [configId], references: [id])
+
+  status      ApprovalFlowStatus @default(PENDING)
+  currentStep Int                @default(0)
+  initiatedBy String
+
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  steps ApprovalStep[]
+
+  @@map("approval_flows")
+}
+
+model ApprovalStep {
+  id             String       @id @default(cuid())
+  approvalFlowId String
+  approvalFlow   ApprovalFlow @relation(fields: [approvalFlowId], references: [id], onDelete: Cascade)
+
+  stepOrder   Int
+  reviewerId  String
+  reviewer    User               @relation("StepReviewer", fields: [reviewerId], references: [id])
+  status      ApprovalStepStatus @default(PENDING)
+  comments    String?
+  justification String?
+
+  assignedAt  DateTime @default(now())
+  respondedAt DateTime?
+
+  @@map("approval_steps")
+}
+
+// ──────────────────────────────────────────────────────
+// CONFIRMACIÓN DE LECTURA
+// ──────────────────────────────────────────────────────
+
+model ReadConfirmation {
+  id                String          @id @default(cuid())
+  userId            String
+  user              User            @relation(fields: [userId], references: [id])
+  documentId        String
+  document          Document        @relation(fields: [documentId], references: [id])
+  documentVersionId String
+  documentVersion   DocumentVersion @relation(fields: [documentVersionId], references: [id])
+
+  // Hash para auditoría inmutable
+  hash        String   @unique // SHA256(userId + documentVersionId + timestamp)
+  confirmedAt DateTime @default(now())
+
+  @@unique([userId, documentVersionId])
+  @@map("read_confirmations")
+}
+
+// ──────────────────────────────────────────────────────
+// NOTIFICACIONES
+// ──────────────────────────────────────────────────────
+
+model Notification {
+  id     String           @id @default(cuid())
+  userId String
+  user   User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type   NotificationType
+  title  String
+  body   String
+  data   Json?            // Datos adicionales (entityId, etc.)
+
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+// ──────────────────────────────────────────────────────
+// AUDITORÍA (append-only)
+// ──────────────────────────────────────────────────────
+
+model AuditLog {
+  id     String      @id @default(cuid())
+  userId String?
+  user   User?       @relation(fields: [userId], references: [id])
+  action AuditAction
+
+  // Entidad afectada
+  entityType String?
+  entityId   String?
+
+  // Referencia directa a documento (para reportes)
+  documentId        String?
+  document          Document?        @relation(fields: [documentId], references: [id])
+  documentVersionId String?
+  documentVersion   DocumentVersion? @relation(fields: [documentVersionId], references: [id])
+
+  // Contexto
+  metadata  Json?
+  ip        String?
+  userAgent String?
+  sessionId String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@index([documentId])
+  @@map("audit_logs")
+}
+
+// ──────────────────────────────────────────────────────
+// BÚSQUEDA Y NAVEGACIÓN
+// ──────────────────────────────────────────────────────
+
+model UserFavorite {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, documentId])
+  @@map("user_favorites")
+}
+
+model UserRecentDocument {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  viewedAt   DateTime @default(now())
+  viewCount  Int      @default(1)
+
+  @@unique([userId, documentId])
+  @@index([userId, viewedAt])
+  @@map("user_recent_documents")
+}
+
+model SearchHistory {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  query     String
+  results   Int?     // Número de resultados
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@map("search_history")
+}
+
+// ──────────────────────────────────────────────────────
+// INTELIGENCIA ARTIFICIAL (solo documentos)
+// ──────────────────────────────────────────────────────
+
+model AISummary {
+  id                String          @id @default(cuid())
+  documentId        String
+  document          Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentVersionId String
+  documentVersion   DocumentVersion @relation(fields: [documentVersionId], references: [id])
+  userId            String
+  user              User            @relation(fields: [userId], references: [id])
+
+  summaryType   AISummaryType
+  summaryLength AISummaryLength
+  content       String?         // Resultado del resumen
+  status        AIJobStatus     @default(PENDING)
+  errorMessage  String?
+
+  // Metadata de generación
+  model         String?   // "llama3.1:8b" | "gpt-4o-mini"
+  provider      AIProvider?
+  promptVersion String?
+  tokensUsed    Int?
+  generationMs  Int?      // Tiempo de generación en ms
+
+  // Para comparativo multi-documento
+  compareDocIds String[] // IDs de documentos comparados
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([documentVersionId])
+  @@index([userId, createdAt])
+  @@map("ai_summaries")
+}
+
+model AIChatSession {
+  id                String          @id @default(cuid())
+  userId            String
+  user              User            @relation(fields: [userId], references: [id])
+  documentId        String
+  document          Document        @relation(fields: [documentId], references: [id])
+  documentVersionId String
+  documentVersion   DocumentVersion @relation(fields: [documentVersionId], references: [id])
+
+  messages     Json    // [{ role: "user"|"assistant", content: string, sourceRef?: string, timestamp: string }]
+  messageCount Int     @default(0)
+
+  // Metadata
+  model    String?
+  provider AIProvider?
+
+  createdAt      DateTime @default(now())
+  lastActivityAt DateTime @default(now())
+
+  @@index([userId, documentVersionId])
+  @@map("ai_chat_sessions")
+}
+
+model AIUsageLog {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  date               DateTime @db.Date
+  summaryCount       Int      @default(0)
+  chatMessageCount   Int      @default(0)
+  tokensUsed         Int      @default(0)
+  provider           AIProvider?
+
+  @@unique([userId, date])
+  @@map("ai_usage_logs")
+}
+
+// ──────────────────────────────────────────────────────
+// CONFIGURACIÓN DEL SISTEMA
+// ──────────────────────────────────────────────────────
+
+model SystemConfig {
+  key       String @id
+  value     String
+  encrypted Boolean @default(false) // Para API keys
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+
+  @@map("system_config")
+}
+
+// ──────────────────────────────────────────────────────
+// EMBEDDINGS para similitud semántica (sugerencias)
+// ──────────────────────────────────────────────────────
+
+model DocumentEmbedding {
+  id                String @id @default(cuid())
+  documentVersionId String @unique
+  embedding         Float[] // Vector de embedding
+  model             String  // Modelo usado para generar el embedding
+  createdAt         DateTime @default(now())
+
+  @@map("document_embeddings")
+}
