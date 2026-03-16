@@ -11,6 +11,7 @@ RUN apk add --no-cache \
     poppler-utils \
     imagemagick \
     python3 \
+    openssl \
     && rm -rf /var/cache/apk/*
 
 WORKDIR /app
