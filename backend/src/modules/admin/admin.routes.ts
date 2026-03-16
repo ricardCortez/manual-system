@@ -13,7 +13,8 @@ import fs from "fs/promises";
 const execAsync = promisify(exec);
 
 export async function adminRoutes(app: FastifyInstance) {
-  app.addHook("preHandler", [authenticate, requireAdmin]);
+  app.addHook("preHandler", authenticate);
+  app.addHook("preHandler", requireAdmin);
 
   // ── GET /api/v1/admin/dashboard ──────────────────────
   app.get("/dashboard", async () => {
