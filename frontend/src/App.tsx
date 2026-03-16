@@ -42,7 +42,7 @@ function PageLoader() {
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <Routes>
           {/* Pública */}
           <Route path="/login" element={<LoginPage />} />

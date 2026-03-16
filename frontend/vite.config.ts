@@ -11,6 +11,10 @@ export default defineConfig({
   server: {
     port: 5173,
     host: "0.0.0.0",
+    hmr: {
+      clientPort: 443,
+      protocol: "wss",
+    },
     proxy: {
       "/api": {
         target: process.env.VITE_API_URL || "http://localhost:3001",
