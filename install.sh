@@ -34,7 +34,7 @@ apt-get install -y -qq \
     curl wget git ca-certificates gnupg lsb-release \
     openssl libnss3-tools mkcert \
     ffmpeg libavcodec-extra \
-    libreoffice-headless libreoffice-calc libreoffice-impress \
+    libreoffice-core-nogui libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui \
     poppler-utils imagemagick \
     build-essential python3
 
