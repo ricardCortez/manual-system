@@ -160,7 +160,7 @@ done
 
 # ── 11. Ejecutar migraciones y seed ─────────────────────
 info "Ejecutando migraciones de base de datos..."
-docker compose run --rm backend sh -c "npx prisma migrate deploy && npm run db:seed"
+docker compose run --rm backend sh -c "npx prisma db push --accept-data-loss && npm run db:seed"
 ok "Migraciones y seed completados"
 
 # ── 12. Iniciar todos los servicios ─────────────────────
