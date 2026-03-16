@@ -8,7 +8,7 @@ WORKDIR /app
 # ── Development ────────────────────────────
 FROM base AS development
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 COPY . .
 EXPOSE 5173
 CMD ["npm", "run", "dev"]
@@ -16,7 +16,7 @@ CMD ["npm", "run", "dev"]
 # ── Builder ────────────────────────────────
 FROM base AS builder
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 COPY . .
 ARG VITE_API_URL=https://manuals.empresa.local
 ENV VITE_API_URL=${VITE_API_URL}

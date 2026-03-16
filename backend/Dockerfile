@@ -19,7 +19,7 @@ WORKDIR /app
 FROM base AS deps
 
 COPY package*.json ./
-RUN npm ci --prefer-offline
+RUN npm install
 
 # ── Stage 3: Development ───────────────────────
 FROM base AS development
