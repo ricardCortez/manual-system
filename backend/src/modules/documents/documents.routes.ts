@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import path from "path";
 import fs from "fs/promises";
-import { createReadStream } from "fs";
+import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 import { prisma } from "../../plugins/prisma";
 import { meiliSearch } from "../../plugins/meilisearch";
@@ -247,7 +247,7 @@ export async function documentRoutes(app: FastifyInstance) {
       const filePath = path.join(destDir, fileName);
 
       // Guardar archivo
-      await pipeline(data.file, createReadStream(filePath) as never);
+      await pipeline(data.file, createWriteStream(filePath));
       const stat = await fs.stat(filePath);
 
       // Convertir a PDF si es necesario (DOCX, XLSX, PPTX)
