@@ -1,10 +1,10 @@
-import { useState, useRef, type FormEvent } from "react";
+import { useState, useRef, useEffect, type FormEvent } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
-import { FileText, Search, Filter, Download, Eye, Plus, Upload, X } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import { FileText, Search, Filter, Eye, Plus, Upload, X, Trash2, AlertCircle, CheckCircle } from "lucide-react";
 import api from "@/lib/api";
 import { useDebounce } from "@/hooks/useDebounce";
-import { useCanEdit } from "@/stores/auth.store";
+import { useCanEdit, useIsAdmin } from "@/stores/auth.store";
 
 interface Document {
   id: string;
@@ -79,20 +79,38 @@ const EMPTY_FORM: NewDocForm = {
   changelog: "",
 };
 
+// Chunked upload settings (5MB chunks)
+const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_RETRIES = 3;
+
 export function DocumentsPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [page, setPage] = useState(1);
   const debouncedSearch = useDebounce(search, 300);
   const canEdit = useCanEdit();
+  const isAdmin = useIsAdmin();
   const queryClient = useQueryClient();
 
+  const [searchParams, setSearchParams] = useSearchParams();
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm] = useState<NewDocForm>(EMPTY_FORM);
+
+  // Abrir modal preseleccionado desde otra página (ej: /documentos?upload=VIDEO)
+  useEffect(() => {
+    const uploadType = searchParams.get("upload");
+    if (uploadType) {
+      setForm({ ...EMPTY_FORM, type: uploadType });
+      setModalOpen(true);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams]);
   const [file, setFile] = useState<File | null>(null);
   const [step, setStep] = useState<"meta" | "upload">("meta");
   const [createdDocId, setCreatedDocId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [isChunkedUpload, setIsChunkedUpload] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data, isLoading } = useQuery({
@@ -133,21 +151,113 @@ export function DocumentsPage() {
     },
   });
 
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.delete(`/documents/${id}`),
+    onSuccess: () => {
+      setDeleteError(null);
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onError: (err: { response?: { data?: { message?: string } } }) => {
+      setDeleteError(err?.response?.data?.message ?? "Error al eliminar el documento");
+    },
+  });
+
+  function handleDelete(doc: Document) {
+    if (!window.confirm(`¿Eliminar "${doc.title}"? Esta acción no se puede deshacer.`)) return;
+    deleteMutation.mutate(doc.id);
+  }
+
+  /**
+   * Uploads file in chunks (5MB each) for better reliability and progress tracking
+   */
+  async function uploadFileInChunks(
+    docId: string,
+    file: File,
+    versionType: string,
+    changelog: string
+  ): Promise<void> {
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const uploadSessionId = `${docId}_${Date.now()}`;
+
+    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+      let retries = 0;
+      let success = false;
+
+      while (retries < MAX_RETRIES && !success) {
+        try {
+          const start = chunkIndex * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, file.size);
+          const chunk = file.slice(start, end);
+
+          const fd = new FormData();
+          fd.append("file", chunk);
+          fd.append("chunkIndex", String(chunkIndex));
+          fd.append("totalChunks", String(totalChunks));
+          fd.append("uploadSessionId", uploadSessionId);
+          fd.append("fileName", file.name);
+          fd.append("fileSize", String(file.size));
+
+          const response = await api.post(`/documents/${docId}/upload-chunk`, fd, {
+            headers: { "Content-Type": "multipart/form-data" },
+          });
+
+          success = true;
+
+          // Update progress
+          const uploadedBytes = end;
+          const percentComplete = Math.round((uploadedBytes / file.size) * 100);
+          setUploadProgress(percentComplete);
+
+          // If last chunk, proceed to final upload
+          if (chunkIndex === totalChunks - 1) {
+            // Now do final upload with full file
+            const finalFd = new FormData();
+            finalFd.append("file", file);
+            finalFd.append("versionType", versionType);
+            if (changelog) finalFd.append("changelog", changelog);
+
+            await api.post(`/documents/${docId}/upload`, finalFd, {
+              headers: { "Content-Type": "multipart/form-data" },
+            });
+          }
+        } catch (err) {
+          retries++;
+          if (retries >= MAX_RETRIES) {
+            const errMsg = (err as any)?.response?.data?.message || "Error uploading chunk";
+            throw new Error(`${errMsg} (chunk ${chunkIndex + 1}/${totalChunks})`);
+          }
+          // Wait before retry
+          await new Promise((resolve) => setTimeout(resolve, 1000 * retries));
+        }
+      }
+    }
+  }
+
   const uploadMutation = useMutation({
     mutationFn: ({ docId, file, versionType, changelog }: { docId: string; file: File; versionType: string; changelog: string }) => {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("versionType", versionType);
-      if (changelog) fd.append("changelog", changelog);
-      return api.post(`/documents/${docId}/upload`, fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      // Use chunked upload for files > 50MB, otherwise direct upload
+      if (file.size > 50 * 1024 * 1024) {
+        setIsChunkedUpload(true);
+        return uploadFileInChunks(docId, file, versionType, changelog);
+      } else {
+        setIsChunkedUpload(false);
+        const fd = new FormData();
+        fd.append("file", file);
+        fd.append("versionType", versionType);
+        if (changelog) fd.append("changelog", changelog);
+        return api.post(`/documents/${docId}/upload`, fd, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["documents"] });
+      setUploadProgress(0);
       closeModal();
     },
     onError: (err: { response?: { data?: { message?: string } } }) => {
+      setUploadProgress(0);
       setUploadError(err?.response?.data?.message ?? "Error al subir el archivo");
     },
   });
@@ -159,6 +269,8 @@ export function DocumentsPage() {
     setStep("meta");
     setCreatedDocId(null);
     setUploadError(null);
+    setUploadProgress(0);
+    setIsChunkedUpload(false);
   }
 
   function handleField(key: keyof NewDocForm, value: string) {
@@ -207,6 +319,15 @@ export function DocumentsPage() {
           )}
         </div>
       </div>
+
+      {deleteError && (
+        <div className="flex items-center justify-between px-4 py-2 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+          <span>{deleteError}</span>
+          <button onClick={() => setDeleteError(null)} className="ml-4 text-red-400 hover:text-red-600">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Filtros */}
       <div className="flex gap-3 flex-wrap">
@@ -275,13 +396,25 @@ export function DocumentsPage() {
                     </span>
                   </td>
                   <td className="px-4 py-3">
-                    <Link
-                      to={`/documentos/${doc.id}`}
-                      className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 text-sm"
-                    >
-                      <Eye className="w-4 h-4" />
-                      <span className="hidden sm:inline">Ver</span>
-                    </Link>
+                    <div className="flex items-center gap-2">
+                      <Link
+                        to={`/documentos/${doc.id}`}
+                        className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 text-sm"
+                      >
+                        <Eye className="w-4 h-4" />
+                        <span className="hidden sm:inline">Ver</span>
+                      </Link>
+                      {isAdmin && (
+                        <button
+                          onClick={() => handleDelete(doc)}
+                          disabled={deleteMutation.isPending}
+                          className="p-1.5 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                          title="Eliminar documento"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -447,13 +580,25 @@ export function DocumentsPage() {
                   ) : (
                     <div>
                       <p className="text-sm font-medium text-gray-700">Haz clic para seleccionar un archivo</p>
-                      <p className="text-xs text-gray-400 mt-1">PDF, DOCX, XLSX, PPTX, imágenes</p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        {form.type === "VIDEO"
+                          ? "MP4, MOV, AVI, MKV, WEBM"
+                          : form.type === "DOCUMENT_VIDEO"
+                          ? "PDF, DOCX, imágenes, MP4, MOV…"
+                          : "PDF, DOCX, XLSX, PPTX, imágenes"}
+                      </p>
                     </div>
                   )}
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt,.png,.jpg,.jpeg,.webp,.md"
+                    accept={
+                      form.type === "VIDEO"
+                        ? ".mp4,.mov,.avi,.mkv,.webm,.wmv,.flv,.m4v"
+                        : form.type === "DOCUMENT_VIDEO"
+                        ? ".pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt,.png,.jpg,.jpeg,.webp,.md,.mp4,.mov,.avi,.mkv,.webm"
+                        : ".pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt,.png,.jpg,.jpeg,.webp,.md"
+                    }
                     className="hidden"
                     onChange={(e) => setFile(e.target.files?.[0] ?? null)}
                   />
@@ -483,7 +628,25 @@ export function DocumentsPage() {
                 </div>
 
                 {uploadError && (
-                  <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">{uploadError}</p>
+                  <div className="flex items-start gap-2 px-3 py-2 bg-red-50 rounded-lg">
+                    <AlertCircle className="w-4 h-4 text-red-600 mt-0.5 shrink-0" />
+                    <p className="text-sm text-red-600">{uploadError}</p>
+                  </div>
+                )}
+
+                {uploadMutation.isPending && uploadProgress > 0 && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs text-gray-600">
+                      <span>{isChunkedUpload ? "Subida segmentada" : "Subiendo"}</span>
+                      <span>{uploadProgress}%</span>
+                    </div>
+                    <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-blue-600 transition-all duration-300"
+                        style={{ width: `${uploadProgress}%` }}
+                      />
+                    </div>
+                  </div>
                 )}
 
                 <div className="flex justify-between gap-3 pt-2">

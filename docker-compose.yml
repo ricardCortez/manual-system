@@ -60,6 +60,15 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    # Optional: Enable GPU acceleration for video encoding (NVIDIA NVENC)
+    # Uncomment below if NVIDIA GPU is available on host
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
 
   # ──────────────────────────────────────────
   # FRONTEND — React + Vite

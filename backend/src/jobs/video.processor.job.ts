@@ -1,19 +1,84 @@
 import type { Job } from "bullmq";
-import { exec } from "child_process";
+import { exec, spawn } from "child_process";
 import { promisify } from "util";
 import path from "path";
 import fs from "fs/promises";
+import { existsSync } from "fs";
 import { prisma } from "../plugins/prisma";
 import { socketServer } from "../plugins/socket";
 import { meiliSearch } from "../plugins/meilisearch";
 
 const execAsync = promisify(exec);
 
+/**
+ * Ejecuta FFmpeg y parsea su salida stderr para reportar progreso en tiempo real.
+ * @param cmd   Comando completo como string (se ejecuta con shell)
+ * @param videoDuration  Duración del video en segundos (para calcular %)
+ * @param onProgress  Callback con fracción [0-1] de progreso
+ * @param timeoutMs  Timeout en ms
+ */
+function runFFmpegWithProgress(
+  cmd: string,
+  videoDuration: number,
+  onProgress: (fraction: number) => void | Promise<void>,
+  timeoutMs = 3600000
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const abort = new AbortController();
+    const timeoutId = AbortSignal.timeout(timeoutMs);
+    timeoutId.addEventListener("abort", () => {
+      abort.abort();
+      reject(new Error("FFmpeg timeout"));
+    });
+
+    const proc = spawn(cmd, {
+      shell: true,
+      stdio: ["ignore", "ignore", "pipe"],
+      signal: abort.signal,
+    });
+
+    proc.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      // FFmpeg emite: "time=HH:MM:SS.mm" en stderr
+      const m = text.match(/time=(\d+):(\d+):(\d+\.\d+)/);
+      if (m && videoDuration > 0) {
+        const currentSecs = parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
+        // Llamada fire-and-forget: los errores de BD no deben abortar el encoding
+        Promise.resolve(onProgress(Math.min(currentSecs / videoDuration, 1))).catch(() => null);
+      }
+    });
+
+    proc.on("close", (code: number | null) => {
+      if (code === 0) resolve();
+      else if (!abort.signal.aborted) reject(new Error(`FFmpeg terminó con código ${code}`));
+    });
+
+    proc.on("error", (err: Error) => {
+      if (!abort.signal.aborted) reject(err);
+    });
+  });
+}
+
 const FFMPEG = process.env.FFMPEG_BIN || "ffmpeg";
 const FFPROBE = process.env.FFMPEG_BIN?.replace("ffmpeg", "ffprobe") || "ffprobe";
 const THREADS = process.env.FFMPEG_THREADS || "4";
-const USE_GPU = process.env.USE_GPU_ENCODING === "true";
+const ADD_GPU_SUPPORT = process.env.ADD_GPU_SUPPORT !== "false"; // Auto-detect by default
 const UPLOAD_BASE = process.env.UPLOAD_BASE_PATH || "./uploads";
+
+/**
+ * Detecta si NVIDIA GPU está disponible para NVENC
+ */
+async function detectGPU(): Promise<boolean> {
+  if (!ADD_GPU_SUPPORT) return false;
+  try {
+    await execAsync("nvidia-smi", { timeout: 5000 });
+    console.log("[VideoProcessor] NVIDIA GPU detected, using NVENC acceleration");
+    return true;
+  } catch {
+    console.log("[VideoProcessor] NVIDIA GPU not available, using CPU encoding");
+    return false;
+  }
+}
 
 interface VideoJobData {
   videoAssetId: string;
@@ -45,7 +110,12 @@ export async function videoProcessor(job: Job<VideoJobData>) {
     });
   };
 
+  let useGPU = false;
   try {
+    // ── PASO 1: Detectar GPU ───────────────────────────
+    await updateStatus("VALIDATING", 2);
+    useGPU = await detectGPU();
+
     // ── PASO 2: Validación ─────────────────────────────
     await updateStatus("VALIDATING", 5);
     const probeResult = await execAsync(
@@ -73,7 +143,9 @@ export async function videoProcessor(job: Job<VideoJobData>) {
     if (height >= 720) resolutions.push({ name: "720p", scale: "1280:720", bitrate: "2800k" });
     resolutions.push({ name: "360p", scale: "640:360", bitrate: "800k" });
 
-    const videoCodec = USE_GPU ? "h264_nvenc" : "libx264";
+    // Select video codec: NVENC (GPU) or libx264 (CPU)
+    const videoCodec = useGPU ? "h264_nvenc" : "libx264";
+    const ffmpegPreset = useGPU ? "fast" : "medium"; // GPU preset
     const hlsStreams: string[] = [];
     const variantStreams: string[] = [];
 
@@ -82,18 +154,29 @@ export async function videoProcessor(job: Job<VideoJobData>) {
       const resDir = path.join(hlsDir, res.name);
       await fs.mkdir(resDir, { recursive: true });
 
-      await updateStatus("GENERATING_HLS", 20 + i * 15);
+      // Rango de progreso para esta resolución: [rangeStart, rangeEnd]
+      const rangeStart = 20 + i * 15;
+      const rangeEnd = 20 + (i + 1) * 15;
+      await updateStatus("GENERATING_HLS", rangeStart);
 
-      await execAsync(
+      const ffmpegCmd =
         `${FFMPEG} -i "${originalPath}" ` +
         `-vf "scale=${res.scale}:force_original_aspect_ratio=decrease,pad=${res.scale}:(ow-iw)/2:(oh-ih)/2" ` +
         `-c:v ${videoCodec} -b:v ${res.bitrate} -maxrate ${res.bitrate} -bufsize ${parseInt(res.bitrate) * 2}k ` +
+        (useGPU ? "" : `-preset ${ffmpegPreset} `) +
         `-threads ${THREADS} ` +
         `-c:a aac -b:a 128k -ar 44100 ` +
         `-hls_time 6 -hls_list_size 0 -hls_segment_type mpegts ` +
         `-hls_segment_filename "${resDir}/segment_%03d.ts" ` +
-        `"${resDir}/index.m3u8"`,
-        { timeout: 3600000 } // 1 hora máximo
+        `"${resDir}/index.m3u8"`;
+
+      await runFFmpegWithProgress(
+        ffmpegCmd,
+        duration,
+        async (fraction) => {
+          const percent = Math.round(rangeStart + fraction * (rangeEnd - rangeStart));
+          await updateStatus("GENERATING_HLS", percent);
+        }
       );
 
       hlsStreams.push(res.name);
@@ -181,6 +264,18 @@ export async function videoProcessor(job: Job<VideoJobData>) {
         createdAt: docVersion.document.createdAt,
         duration,
       });
+    }
+
+    // ── PASO 11: Limpiar archivo original ──────────────
+    // Delete original video file after successful indexing to save storage (30-40% savings)
+    if (existsSync(originalPath)) {
+      try {
+        await fs.unlink(originalPath);
+        console.log(`[VideoProcessor] Original video deleted: ${originalPath}`);
+      } catch (cleanupErr) {
+        console.warn(`[VideoProcessor] Failed to delete original: ${cleanupErr}`);
+        // Continue even if cleanup fails
+      }
     }
 
     // Actualizar VideoAsset con toda la info

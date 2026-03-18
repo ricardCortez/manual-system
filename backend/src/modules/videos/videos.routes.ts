@@ -1,14 +1,76 @@
 import type { FastifyInstance } from "fastify";
 import path from "path";
 import fs from "fs/promises";
-import { createReadStream, existsSync } from "fs";
+import { existsSync } from "fs";
 import { pipeline } from "stream/promises";
+import { createWriteStream } from "fs";
+import { exec } from "child_process";
+import { promisify } from "util";
 import { prisma } from "../../plugins/prisma";
 import { authenticate, requireEditor } from "../../middleware/auth.middleware";
 import { createAuditLog } from "../../middleware/audit.middleware";
 import { videoQueue } from "../../jobs/queues";
 
+const execAsync = promisify(exec);
 const UPLOAD_BASE = process.env.UPLOAD_BASE_PATH || "./uploads";
+const FFPROBE = process.env.FFMPEG_BIN?.replace("ffmpeg", "ffprobe") || "ffprobe";
+
+/**
+ * Validates video properties early using ffprobe:
+ * - Duration: 5-3600 seconds
+ * - Codec: h264, h265, vp8, vp9, etc.
+ * - Resolution: max 4K
+ */
+async function validateVideoFile(filePath: string): Promise<{
+  duration: number;
+  width: number;
+  height: number;
+  codec: string;
+} | null> {
+  const MIN_DURATION = parseInt(process.env.MIN_VIDEO_DURATION_SECS || "5");
+  const MAX_DURATION = parseInt(process.env.MAX_VIDEO_DURATION_SECS || "3600");
+
+  try {
+    const result = await execAsync(
+      `${FFPROBE} -v error -show_format -show_streams -print_format json "${filePath}"`,
+      { timeout: 10000 }
+    );
+
+    const probe = JSON.parse(result.stdout) as {
+      format: { duration: string };
+      streams: Array<{ codec_type: string; codec_name: string; width?: number; height?: number }>;
+    };
+
+    const videoStream = probe.streams.find((s) => s.codec_type === "video");
+    if (!videoStream) {
+      throw new Error("No video stream found in file");
+    }
+
+    const duration = parseFloat(probe.format.duration);
+    const width = videoStream.width || 0;
+    const height = videoStream.height || 0;
+    const codec = videoStream.codec_name || "unknown";
+
+    // Validate ranges
+    if (duration < MIN_DURATION || duration > MAX_DURATION) {
+      throw new Error(
+        `Video duration ${duration}s out of range [${MIN_DURATION}s, ${MAX_DURATION}s]`
+      );
+    }
+
+    if (width > 4096 || height > 4096) {
+      throw new Error(`Video resolution ${width}x${height} exceeds 4K limit`);
+    }
+
+    return { duration, width, height, codec };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("timeout")) {
+      throw new Error("Video validation timeout — file may be corrupted or too large");
+    }
+    throw new Error(`Video validation failed: ${message}`);
+  }
+}
 
 export async function videoRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
@@ -62,7 +124,7 @@ export async function videoRoutes(app: FastifyInstance) {
       const fileName = `${documentVersionId}${ext}`;
       const originalPath = path.join(origDir, fileName);
 
-      await pipeline(data.file, createReadStream(originalPath) as never);
+      await pipeline(data.file, createWriteStream(originalPath));
       const stat = await fs.stat(originalPath);
 
       // Verificar tamaño máximo
@@ -73,6 +135,23 @@ export async function videoRoutes(app: FastifyInstance) {
           statusCode: 413,
           error: "Payload Too Large",
           message: `El video supera el límite de ${process.env.MAX_VIDEO_SIZE_MB || 2048}MB`,
+        });
+      }
+
+      // ── EARLY VALIDATION: Validate video before enqueuing ──
+      let videoInfo;
+      try {
+        videoInfo = await validateVideoFile(originalPath);
+        if (!videoInfo) {
+          throw new Error("Video validation returned no data");
+        }
+      } catch (validationErr) {
+        await fs.unlink(originalPath).catch(() => null);
+        const errMsg = validationErr instanceof Error ? validationErr.message : String(validationErr);
+        return reply.status(400).send({
+          statusCode: 400,
+          error: "Bad Request",
+          message: `Video validation failed: ${errMsg}`,
         });
       }
 
