@@ -93,12 +93,13 @@ export async function userRoutes(app: FastifyInstance) {
       return reply.status(409).send({ statusCode: 409, error: "Conflict", message: "El email ya está registrado" });
     }
 
-    const passwordHash = await bcrypt.hash(data.password, parseInt(process.env.BCRYPT_ROUNDS || "12"));
+    const { password: _pw, ...rest } = data;
+    const passwordHash = await bcrypt.hash(_pw, parseInt(process.env.BCRYPT_ROUNDS || "12"));
 
     const user = await prisma.user.create({
       data: {
-        ...data,
-        email: data.email.toLowerCase(),
+        ...rest,
+        email: rest.email.toLowerCase(),
         passwordHash,
         passwordChangedAt: new Date(),
       },
