@@ -1,4 +1,7 @@
 import "dotenv/config";
+import dotenv from "dotenv";
+// Runtime override: allows changing env vars without rebuilding the container
+dotenv.config({ override: true, path: `${__dirname}/.env.override` });
 import Fastify from "fastify";
 import fastifyCors from "@fastify/cors";
 import fastifyHelmet from "@fastify/helmet";
@@ -62,7 +65,7 @@ async function buildApp() {
   });
 
   await app.register(fastifyCors, {
-    origin: process.env.APP_URL || "https://manuals.empresa.local",
+    origin: true, // Auth via JWT — CORS abierto para acceso por IP o hostname en LAN
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   });
@@ -75,6 +78,9 @@ async function buildApp() {
     redis: redis,
     keyGenerator: (request) =>
       request.user?.id || request.ip || "anonymous",
+    // Upload-chunk routes have their own per-route limit; skip global counter
+    // so large multi-chunk uploads are not blocked by the general 100/min cap.
+    skip: (request: { url: string }) => /\/upload(-chunk)?$/.test(request.url),
     errorResponseBuilder: () => ({
       statusCode: 429,
       error: "Too Many Requests",
@@ -162,6 +168,15 @@ async function buildApp() {
   }
 
   // ── Socket.io ────────────────────────────────────────
+  // Hijack /socket.io requests before Fastify routes them — socket.io handles
+  // them directly on the HTTP server (both WebSocket upgrade and polling).
+  // Without this, Fastify's notFoundHandler also responds, corrupting the stream.
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.raw.url?.startsWith("/socket.io")) {
+      reply.hijack();
+    }
+  });
+
   socketServer.attach(app.server);
 
   // ── Rutas ────────────────────────────────────────────
@@ -175,16 +190,31 @@ async function buildApp() {
   await app.register(notificationRoutes, { prefix: "/api/v1/notifications" });
   await app.register(adminRoutes, { prefix: "/api/v1/admin" });
 
+  // ── PDF.js worker — MIME type correcto sin depender de nginx ──
+  app.get("/api/v1/pdf-worker", { schema: { hide: true } }, async (_req: any, reply: any) => {
+    const workerPath = path.resolve(process.env.UPLOAD_BASE_PATH || "./uploads", "pdf.worker.min.mjs");
+    try {
+      const content = await fs.promises.readFile(workerPath);
+      return reply
+        .header("Content-Type", "application/javascript; charset=utf-8")
+        .header("Cache-Control", "public, max-age=31536000, immutable")
+        .send(content);
+    } catch {
+      return reply.status(404).send({ message: "PDF worker not found" });
+    }
+  });
+
   // ── Health check ─────────────────────────────────────
   app.get("/health", { schema: { hide: true } }, async () => {
     const dbOk = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(() => false);
     const redisOk = await redis.ping().then((r) => r === "PONG").catch(() => false);
+    const meiliOk = await meiliSearch.client.health().then(() => true).catch(() => false);
 
     return {
-      status: dbOk && redisOk ? "ok" : "degraded",
+      status: dbOk && redisOk && meiliOk ? "ok" : "degraded",
       timestamp: new Date().toISOString(),
       version: "1.0.0",
-      services: { database: dbOk, redis: redisOk },
+      services: { database: dbOk, redis: redisOk, meilisearch: meiliOk },
     };
   });
 

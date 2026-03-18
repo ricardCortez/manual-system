@@ -3,6 +3,7 @@
 backend/.env
 frontend/.env
 *.local
+/backend/uploads
 
 # Node modules
 node_modules/

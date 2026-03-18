@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, type FormEvent } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams, useNavigate } from "react-router-dom";
 import { FileText, Search, Filter, Eye, Plus, Upload, X, Trash2, AlertCircle, CheckCircle } from "lucide-react";
 import api from "@/lib/api";
 import { useDebounce } from "@/hooks/useDebounce";
@@ -80,7 +80,7 @@ const EMPTY_FORM: NewDocForm = {
 };
 
 // Chunked upload settings (5MB chunks)
-const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB
+const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB — reduces chunk count and rate-limit pressure
 const MAX_RETRIES = 3;
 
 export function DocumentsPage() {
@@ -91,16 +91,20 @@ export function DocumentsPage() {
   const canEdit = useCanEdit();
   const isAdmin = useIsAdmin();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm] = useState<NewDocForm>(EMPTY_FORM);
+  const [returnTo, setReturnTo] = useState<string | null>(null);
 
-  // Abrir modal preseleccionado desde otra página (ej: /documentos?upload=VIDEO)
+  // Abrir modal preseleccionado desde otra página (ej: /documentos?upload=VIDEO&returnTo=/videos)
   useEffect(() => {
     const uploadType = searchParams.get("upload");
+    const returnPath = searchParams.get("returnTo");
     if (uploadType) {
       setForm({ ...EMPTY_FORM, type: uploadType });
+      setReturnTo(returnPath);
       setModalOpen(true);
       setSearchParams({}, { replace: true });
     }
@@ -121,6 +125,7 @@ export function DocumentsPage() {
           params: {
             search: debouncedSearch || undefined,
             status: statusFilter || undefined,
+            excludeType: "VIDEO", // los videos tienen su propia sección
             page,
             limit: 20,
           },
@@ -191,43 +196,37 @@ export function DocumentsPage() {
           const chunk = file.slice(start, end);
 
           const fd = new FormData();
-          fd.append("file", chunk);
+          // Los campos deben ir ANTES del archivo para que @fastify/multipart
+          // los lea en data.fields (lee en orden de stream)
           fd.append("chunkIndex", String(chunkIndex));
           fd.append("totalChunks", String(totalChunks));
           fd.append("uploadSessionId", uploadSessionId);
           fd.append("fileName", file.name);
           fd.append("fileSize", String(file.size));
+          fd.append("versionType", versionType);
+          if (changelog) fd.append("changelog", changelog);
+          fd.append("file", chunk); // archivo siempre al final
 
-          const response = await api.post(`/documents/${docId}/upload-chunk`, fd, {
+          await api.post(`/documents/${docId}/upload-chunk`, fd, {
             headers: { "Content-Type": "multipart/form-data" },
           });
 
           success = true;
 
-          // Update progress
-          const uploadedBytes = end;
-          const percentComplete = Math.round((uploadedBytes / file.size) * 100);
-          setUploadProgress(percentComplete);
-
-          // If last chunk, proceed to final upload
-          if (chunkIndex === totalChunks - 1) {
-            // Now do final upload with full file
-            const finalFd = new FormData();
-            finalFd.append("file", file);
-            finalFd.append("versionType", versionType);
-            if (changelog) finalFd.append("changelog", changelog);
-
-            await api.post(`/documents/${docId}/upload`, finalFd, {
-              headers: { "Content-Type": "multipart/form-data" },
-            });
-          }
+          // Actualizar barra de progreso (0-100% = subida de chunks)
+          setUploadProgress(Math.round((end / file.size) * 100));
         } catch (err) {
+          const status = (err as { response?: { status?: number } })?.response?.status;
+          // No reintentar errores 4xx (semánticos: video inválido, tamaño incorrecto, etc.)
+          if (status && status >= 400 && status < 500) {
+            const errMsg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message || "Error en la subida";
+            throw new Error(errMsg);
+          }
           retries++;
           if (retries >= MAX_RETRIES) {
-            const errMsg = (err as any)?.response?.data?.message || "Error uploading chunk";
+            const errMsg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message || "Error uploading chunk";
             throw new Error(`${errMsg} (chunk ${chunkIndex + 1}/${totalChunks})`);
           }
-          // Wait before retry
           await new Promise((resolve) => setTimeout(resolve, 1000 * retries));
         }
       }
@@ -243,9 +242,9 @@ export function DocumentsPage() {
       } else {
         setIsChunkedUpload(false);
         const fd = new FormData();
-        fd.append("file", file);
         fd.append("versionType", versionType);
         if (changelog) fd.append("changelog", changelog);
+        fd.append("file", file); // archivo al final
         return api.post(`/documents/${docId}/upload`, fd, {
           headers: { "Content-Type": "multipart/form-data" },
         });
@@ -253,8 +252,9 @@ export function DocumentsPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["documents"] });
+      queryClient.invalidateQueries({ queryKey: ["videos"] });
       setUploadProgress(0);
-      closeModal();
+      closeModal(true);
     },
     onError: (err: { response?: { data?: { message?: string } } }) => {
       setUploadProgress(0);
@@ -262,11 +262,16 @@ export function DocumentsPage() {
     },
   });
 
-  function closeModal() {
+  function closeModal(uploadSucceeded = false) {
     setModalOpen(false);
     setForm(EMPTY_FORM);
     setFile(null);
     setStep("meta");
+    if (uploadSucceeded && returnTo) {
+      navigate(returnTo);
+      return;
+    }
+    setReturnTo(null);
     setCreatedDocId(null);
     setUploadError(null);
     setUploadProgress(0);

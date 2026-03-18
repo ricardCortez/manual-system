@@ -12,12 +12,20 @@ import { format } from "date-fns";
 import { es } from "date-fns/locale";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import api from "@/lib/api";
+import { useCanEdit } from "@/stores/auth.store";
 import { SummaryPanel } from "@/components/ai/SummaryPanel";
 import { ChatDrawer } from "@/components/ai/ChatDrawer";
 import { VideoPlayer } from "@/components/video/VideoPlayer";
+import { getSocket } from "@/lib/socket";
+// Worker de PDF.js servido por el backend con Content-Type: application/javascript correcto
+// nginx /uploads/ sirve .mjs como octet-stream; el backend lo sirve con el MIME correcto
+pdfjs.GlobalWorkerOptions.workerSrc = "/api/v1/pdf-worker";
 
-// Configurar worker de PDF.js
-pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.js`;
+// filePath se guarda como "./uploads/..." → convertir a "/uploads/..."
+function fileUrl(filePath: string | null | undefined): string {
+  if (!filePath) return "";
+  return "/" + filePath.replace(/^\.\//, "");
+}
 
 const statusLabels: Record<string, string> = {
   BORRADOR: "Borrador",
@@ -33,6 +41,8 @@ const confLabels: Record<string, { label: string; color: string }> = {
   CRITICO:     { label: "Crítico",     color: "var(--conf-critical)" },
 };
 
+const STATUS_OPTIONS = ["BORRADOR", "EN_REVISION", "APROBADO", "PUBLICADO", "OBSOLETO"] as const;
+
 export function DocumentViewerPage() {
   const { id } = useParams<{ id: string }>();
   const [numPages, setNumPages] = useState<number>(0);
@@ -40,14 +50,42 @@ export function DocumentViewerPage() {
   const [isFavorite, setIsFavorite] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [headerHidden, setHeaderHidden] = useState(false);
+  const [videoProgress, setVideoProgress] = useState<{ step: string; percent: number } | null>(null);
   const lastScrollY = useRef(0);
   const queryClient = useQueryClient();
+  const canEdit = useCanEdit();
 
   const { data: document, isLoading } = useQuery({
     queryKey: ["document", id],
     queryFn: () => api.get(`/documents/${id}`).then((r) => r.data),
     enabled: !!id,
+    refetchInterval: (query) => {
+      const doc = query.state.data;
+      const version = doc?.versions?.[0];
+      const status = version?.videoAsset?.processingStatus;
+      if (status && status !== "COMPLETED" && status !== "FAILED") return 5000;
+      return false;
+    },
   });
+
+  // Escuchar progreso de video en tiempo real vía socket
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return;
+
+    const handler = (data: { videoId: string; step: string; percent: number; status: string }) => {
+      setVideoProgress({ step: data.step, percent: data.percent });
+
+      if (data.status === "completed" || data.status === "failed") {
+        // Forzar refetch para obtener la URL HLS final
+        queryClient.invalidateQueries({ queryKey: ["document", id] });
+        setVideoProgress(null);
+      }
+    };
+
+    socket.on("video:progress", handler);
+    return () => { socket.off("video:progress", handler); };
+  }, [id, queryClient]);
 
   // Detectar scroll para modo inmersivo
   useEffect(() => {
@@ -66,6 +104,12 @@ export function DocumentViewerPage() {
         ? api.delete(`/documents/${id}/favorite`)
         : api.post(`/documents/${id}/favorite`),
     onSuccess: () => setIsFavorite((v) => !v),
+  });
+
+  const statusMutation = useMutation({
+    mutationFn: (status: string) =>
+      api.patch(`/documents/${id}/status`, { status }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["document", id] }),
   });
 
   const confirmReadMutation = useMutation({
@@ -126,7 +170,7 @@ export function DocumentViewerPage() {
               className="p-2 rounded-lg transition-colors"
               style={{ color: "var(--text-tertiary)" }}
               title="Descargar"
-              onClick={() => window.open(`/uploads/${currentVersion?.filePath}`, "_blank")}
+              onClick={() => window.open(fileUrl(currentVersion?.filePath), "_blank")}
             >
               <Download size={16} />
             </button>
@@ -188,15 +232,36 @@ export function DocumentViewerPage() {
             </div>
 
             {/* Estado */}
-            <div
-              className="relative shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-500"
-              style={{
-                background: "var(--bg-secondary)",
-                borderLeft: `3px solid var(--status-${document.status?.toLowerCase() === "en_revision" ? "review" : document.status?.toLowerCase()})`,
-              }}
-            >
-              {statusLabels[document.status] || document.status}
-            </div>
+            {canEdit ? (
+              <select
+                value={document.status}
+                onChange={(e) => statusMutation.mutate(e.target.value)}
+                disabled={statusMutation.isPending}
+                className="shrink-0 px-3 py-1.5 rounded-lg text-sm font-500 cursor-pointer"
+                style={{
+                  background: "var(--bg-secondary)",
+                  color: "var(--text-primary)",
+                  borderTop: "1px solid var(--border-subtle)",
+                  borderRight: "1px solid var(--border-subtle)",
+                  borderBottom: "1px solid var(--border-subtle)",
+                  borderLeft: `3px solid var(--status-${document.status?.toLowerCase() === "en_revision" ? "review" : document.status?.toLowerCase()})`,
+                }}
+              >
+                {STATUS_OPTIONS.map((s) => (
+                  <option key={s} value={s}>{statusLabels[s] || s}</option>
+                ))}
+              </select>
+            ) : (
+              <div
+                className="relative shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-500"
+                style={{
+                  background: "var(--bg-secondary)",
+                  borderLeft: `3px solid var(--status-${document.status?.toLowerCase() === "en_revision" ? "review" : document.status?.toLowerCase()})`,
+                }}
+              >
+                {statusLabels[document.status] || document.status}
+              </div>
+            )}
           </div>
 
           {/* Tags */}
@@ -223,18 +288,57 @@ export function DocumentViewerPage() {
         {/* Visor de contenido */}
         {isVideoType && currentVersion?.videoAsset && (
           <div className="mb-6">
-            <VideoPlayer
-              hlsUrl={`/uploads/${currentVersion.videoAsset.hlsManifestPath}`}
-              thumbnailUrl={currentVersion.videoAsset.thumbnailPath ? `/uploads/${currentVersion.videoAsset.thumbnailPath}` : undefined}
-              chapters={currentVersion.videoAsset.chapters}
-              transcriptSegments={currentVersion.videoAsset.transcript?.segments}
-              vttUrl={currentVersion.videoAsset.transcript?.vttPath ? `/uploads/${currentVersion.videoAsset.transcript.vttPath}` : undefined}
-              title={document.title}
-            />
+            {currentVersion.videoAsset.processingStatus === "COMPLETED" && currentVersion.videoAsset.hlsManifestPath ? (
+              <VideoPlayer
+                hlsUrl={`/uploads/${currentVersion.videoAsset.hlsManifestPath}`}
+                thumbnailUrl={currentVersion.videoAsset.thumbnailPath ? `/uploads/${currentVersion.videoAsset.thumbnailPath}` : undefined}
+                chapters={currentVersion.videoAsset.chapters}
+                transcriptSegments={currentVersion.videoAsset.transcript?.segments}
+                vttUrl={currentVersion.videoAsset.transcript?.vttPath ? `/uploads/${currentVersion.videoAsset.transcript.vttPath}` : undefined}
+                title={document.title}
+              />
+            ) : (
+              <div
+                className="rounded-2xl flex flex-col items-center justify-center py-16 gap-3"
+                style={{ background: "var(--bg-secondary)", border: "1px solid var(--border-subtle)" }}
+              >
+                {currentVersion.videoAsset.processingStatus !== "FAILED" && (
+                  <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                )}
+                <p className="text-sm font-500" style={{ color: "var(--text-primary)" }}>
+                  {currentVersion.videoAsset.processingStatus === "FAILED"
+                    ? "Error al procesar el video"
+                    : "Procesando video…"}
+                </p>
+                {currentVersion.videoAsset.processingStatus !== "FAILED" && (() => {
+                  // Preferir progreso en tiempo real del socket; fallback al polleado
+                  const livePercent = videoProgress?.percent ?? currentVersion.videoAsset.processingProgress;
+                  const liveStep = videoProgress?.step ?? currentVersion.videoAsset.processingStatus;
+                  return (
+                    <div className="w-64 flex flex-col gap-1.5 items-center">
+                      <div className="w-full h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-tertiary)" }}>
+                        <div
+                          className="h-full rounded-full transition-all duration-500"
+                          style={{ width: `${livePercent}%`, background: "var(--color-primary, #3B82F6)" }}
+                        />
+                      </div>
+                      <p className="text-xs" style={{ color: "var(--text-tertiary)" }}>
+                        {liveStep} — {livePercent}%
+                      </p>
+                    </div>
+                  );
+                })()}
+                {currentVersion.videoAsset.processingStatus !== "FAILED" && (
+                  <p className="text-xs" style={{ color: "var(--text-tertiary)" }}>
+                    Esta página se actualizará automáticamente cuando esté listo.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         )}
 
-        {isDocType && currentVersion?.filePath && currentVersion.mimeType === "application/pdf" && (
+        {isDocType && currentVersion?.filePath && (currentVersion.mimeType === "application/pdf" || currentVersion.fileType === "PDF") && (
           <div
             className="rounded-2xl overflow-hidden mb-6"
             style={{ border: "1px solid var(--border-subtle)", background: "#525659" }}
@@ -266,7 +370,7 @@ export function DocumentViewerPage() {
                 </button>
               </div>
               <button
-                onClick={() => window.open(`/uploads/${currentVersion.filePath}`, "_blank")}
+                onClick={() => window.open(fileUrl(currentVersion.filePath), "_blank")}
                 className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-colors"
                 style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
               >
@@ -278,7 +382,7 @@ export function DocumentViewerPage() {
             {/* Visor react-pdf */}
             <div className="flex justify-center p-6">
               <Document
-                file={`/uploads/${currentVersion.filePath}`}
+                file={fileUrl(currentVersion.filePath)}
                 onLoadSuccess={({ numPages: n }) => setNumPages(n)}
                 loading={<div className="skeleton w-full max-w-2xl" style={{ height: 800 }} />}
               >

@@ -28,7 +28,18 @@ export function AdminDashboard() {
 
   const { data: health } = useQuery({
     queryKey: ["health"],
-    queryFn: () => api.get("/health", { baseURL: "/" }).then((r) => r.data),
+    queryFn: async () => {
+      try {
+        // Make request to /health endpoint through current host (goes via Nginx)
+        const response = await fetch("/health");
+        if (!response.ok) throw new Error("Health check failed");
+        return response.json();
+      } catch (err) {
+        console.error("Health check error:", err);
+        // Return false for all services if health check fails
+        return { services: { database: false, redis: false, meilisearch: false } };
+      }
+    },
     refetchInterval: 30000,
   });
 

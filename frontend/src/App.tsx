@@ -14,6 +14,7 @@ const SearchPage       = lazy(() => import("@/pages/SearchPage").then((m) => ({ 
 const AreasPage        = lazy(() => import("@/pages/AreasPage").then((m) => ({ default: m.AreasPage })));
 const AdminDashboard   = lazy(() => import("@/pages/admin/AdminDashboard").then((m) => ({ default: m.AdminDashboard })));
 const AdminUsers       = lazy(() => import("@/pages/admin/AdminUsers").then((m) => ({ default: m.AdminUsers })));
+const AdminAreas       = lazy(() => import("@/pages/admin/AdminAreas").then((m) => ({ default: m.AdminAreas })));
 const AdminConfig      = lazy(() => import("@/pages/admin/AdminConfig").then((m) => ({ default: m.AdminConfig })));
 
 const queryClient = new QueryClient({
@@ -105,6 +106,14 @@ export default function App() {
               element={
                 <Suspense fallback={<PageLoader />}>
                   <AdminUsers />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/admin/areas"
+              element={
+                <Suspense fallback={<PageLoader />}>
+                  <AdminAreas />
                 </Suspense>
               }
             />

@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Settings, Save, RefreshCw } from "lucide-react";
+import { Settings, Save, RefreshCw, Trash2, AlertTriangle } from "lucide-react";
 import { useState, useEffect } from "react";
 import api from "@/lib/api";
 import { useAuthStore } from "@/stores/auth.store";
@@ -46,6 +46,24 @@ export function AdminConfig() {
 
   const reindexMutation = useMutation({
     mutationFn: () => api.post("/admin/reindex"),
+  });
+
+  const { data: cleanupPreview, refetch: refetchPreview } = useQuery({
+    queryKey: ["admin-cleanup-preview"],
+    queryFn: () => api.get("/admin/cleanup").then((r) => r.data),
+    enabled: isSuperAdmin,
+  });
+
+  const [confirmCleanup, setConfirmCleanup] = useState(false);
+  const [cleanupResult, setCleanupResult] = useState<Record<string, number> | null>(null);
+
+  const cleanupMutation = useMutation({
+    mutationFn: () => api.post("/admin/cleanup"),
+    onSuccess: (res) => {
+      setCleanupResult(res.data);
+      setConfirmCleanup(false);
+      refetchPreview();
+    },
   });
 
   if (!isSuperAdmin) return <Navigate to="/admin" replace />;
@@ -118,7 +136,98 @@ export function AdminConfig() {
             {reindexMutation.isPending ? "Indexando..." : "Reindexar"}
           </button>
         </div>
+
+        <div className="border-t border-gray-100 pt-4 space-y-3">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium text-gray-700">Limpiar registros y archivos</p>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Elimina documentos borrados, videos fallidos/atascados, tokens expirados y datos obsoletos
+              </p>
+            </div>
+            <button
+              onClick={() => { setCleanupResult(null); setConfirmCleanup(true); }}
+              disabled={cleanupMutation.isPending}
+              className="shrink-0 inline-flex items-center gap-2 px-3 py-2 border border-red-200 text-red-600 rounded-lg text-sm hover:bg-red-50 disabled:opacity-50 transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
+              Limpiar
+            </button>
+          </div>
+
+          {/* Preview de lo que se limpiará */}
+          {cleanupPreview?.preview && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {[
+                { key: "softDeletedDocuments", label: "Docs eliminados" },
+                { key: "failedVideoAssets",    label: "Videos fallidos" },
+                { key: "stuckVideoAssets",     label: "Videos atascados" },
+                { key: "expiredTokens",        label: "Tokens expirados" },
+                { key: "oldNotifications",     label: "Notificaciones antiguas" },
+                { key: "oldSearchHistory",     label: "Historial búsqueda" },
+              ].map(({ key, label }) => (
+                <div key={key} className="flex justify-between items-center px-3 py-1.5 bg-gray-50 rounded-lg text-xs">
+                  <span className="text-gray-500">{label}</span>
+                  <span className={`font-semibold ${cleanupPreview.preview[key] > 0 ? "text-red-600" : "text-gray-400"}`}>
+                    {cleanupPreview.preview[key]}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Resultado tras ejecutar */}
+          {cleanupResult && (
+            <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-xs text-green-700 space-y-1">
+              <p className="font-semibold">✓ Limpieza completada</p>
+              {Object.entries(cleanupResult)
+                .filter(([k, v]) => k !== "errors" && k !== "freedBytes" && (v as number) > 0)
+                .map(([k, v]) => (
+                  <p key={k}>{k}: <span className="font-medium">{v as number}</span> eliminados</p>
+                ))
+              }
+              {(cleanupResult.freedBytes as number) > 0 && (
+                <p>Espacio liberado: <span className="font-medium">{((cleanupResult.freedBytes as number) / (1024 * 1024)).toFixed(1)} MB</span></p>
+              )}
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Modal de confirmación */}
+      {confirmCleanup && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-xl p-6 max-w-sm w-full mx-4 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-red-100 rounded-lg">
+                <AlertTriangle className="w-5 h-5 text-red-600" />
+              </div>
+              <div>
+                <p className="font-semibold text-gray-900">Confirmar limpieza</p>
+                <p className="text-xs text-gray-400">Esta acción es irreversible</p>
+              </div>
+            </div>
+            <p className="text-sm text-gray-600">
+              Se eliminarán permanentemente los registros y archivos indicados en la vista previa. Los documentos activos y usuarios no se verán afectados.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setConfirmCleanup(false)}
+                className="flex-1 px-4 py-2 border border-gray-200 rounded-lg text-sm hover:bg-gray-50 transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => cleanupMutation.mutate()}
+                disabled={cleanupMutation.isPending}
+                className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50 transition-colors"
+              >
+                {cleanupMutation.isPending ? "Limpiando..." : "Confirmar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

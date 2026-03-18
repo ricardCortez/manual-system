@@ -19,6 +19,7 @@ const navItems = [
 const adminItems = [
   { to: "/admin", icon: Activity, label: "Dashboard Admin" },
   { to: "/admin/usuarios", icon: Users, label: "Usuarios" },
+  { to: "/admin/areas", icon: FolderTree, label: "Áreas" },
   { to: "/admin/configuracion", icon: Settings, label: "Configuración" },
 ];
 

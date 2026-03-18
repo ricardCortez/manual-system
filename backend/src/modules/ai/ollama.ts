@@ -2,10 +2,16 @@
 // Cliente Ollama — LLM Self-hosted
 // ──────────────────────────────────────────────────────
 
-const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
-const DEFAULT_MODEL = process.env.OLLAMA_DEFAULT_MODEL || "llama3.1:8b";
-const FALLBACK_MODEL = process.env.OLLAMA_FALLBACK_MODEL || "mistral:7b";
-const TIMEOUT = parseInt(process.env.OLLAMA_TIMEOUT_MS || "120000");
+// When OLLAMA_BASE_URL points to localhost, replace with Docker host gateway so
+// the backend container can reach Ollama running on the host machine.
+const _rawOllamaUrl = process.env.OLLAMA_BASE_URL || "http://172.20.0.1:11434";
+const OLLAMA_BASE_URL = _rawOllamaUrl.replace(/^(https?:\/\/)localhost(:\d+)?/, "$1172.20.0.1$2");
+const DEFAULT_MODEL = process.env.OLLAMA_DEFAULT_MODEL || "qwen2.5:0.5b";
+const FALLBACK_MODEL = process.env.OLLAMA_FALLBACK_MODEL || "qwen2.5:0.5b";
+const TIMEOUT = parseInt(process.env.OLLAMA_TIMEOUT_MS || "300000"); // 5min for CPU inference
+// num_ctx: ventana de contexto. qwen2.5 soporta hasta 32K, pero con 4GB RAM limitamos a 4096
+// para dejar margen al sistema. Configurable via OLLAMA_NUM_CTX.
+const NUM_CTX = parseInt(process.env.OLLAMA_NUM_CTX || "4096");
 
 interface OllamaResponse {
   model: string;
@@ -43,17 +49,21 @@ export const ollamaClient = {
           stream: false,
           options: {
             temperature: options.temperature ?? 0.3,
-            num_ctx: 8192,
+            num_ctx: NUM_CTX,
           },
         }),
         signal: controller.signal,
       });
 
       if (!response.ok) {
-        // Si el modelo no existe, intentar con fallback
+        // Si el modelo no existe, intentar con fallback en cascada
         if (response.status === 404 && model !== FALLBACK_MODEL) {
           console.warn(`[Ollama] Modelo ${model} no disponible, usando ${FALLBACK_MODEL}`);
           return this.generate(prompt, { ...options, model: FALLBACK_MODEL });
+        }
+        if (response.status === 404 && model !== "qwen2.5:0.5b") {
+          console.warn(`[Ollama] Modelo ${model} no disponible, usando qwen2.5:0.5b`);
+          return this.generate(prompt, { ...options, model: "qwen2.5:0.5b" });
         }
         throw new Error(`Ollama HTTP ${response.status}: ${await response.text()}`);
       }
@@ -86,7 +96,7 @@ export const ollamaClient = {
           model,
           prompt,
           stream: true,
-          options: { temperature: 0.3, num_ctx: 8192 },
+          options: { temperature: 0.3, num_ctx: 2048 },
         }),
         signal: controller.signal,
       });

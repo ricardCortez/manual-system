@@ -54,6 +54,7 @@ const listDocumentsSchema = z.object({
   areaId: z.string().optional(),
   status: z.string().optional(),
   type: z.string().optional(),
+  excludeType: z.string().optional(), // excluir un tipo específico (ej: VIDEO)
   confidentiality: z.string().optional(),
   search: z.string().optional(),
   tags: z.string().optional(), // CSV de tags
@@ -70,8 +71,8 @@ async function validateVideoFile(filePath: string): Promise<{
   height: number;
   codec: string;
 } | null> {
-  const MIN_DURATION = parseInt(process.env.MIN_VIDEO_DURATION_SECS || "5");
-  const MAX_DURATION = parseInt(process.env.MAX_VIDEO_DURATION_SECS || "3600");
+  const MIN_DURATION = parseInt(process.env.MIN_VIDEO_DURATION_SECS || "1");
+  const MAX_DURATION = parseInt(process.env.MAX_VIDEO_DURATION_SECS || "14400"); // 4 horas por defecto
 
   try {
     const result = await execAsync(
@@ -129,6 +130,7 @@ export async function documentRoutes(app: FastifyInstance) {
       ...(params.areaId && { areaId: params.areaId }),
       ...(params.status && { status: params.status as DocumentStatus }),
       ...(params.type && { type: params.type as DocumentType }),
+      ...(params.excludeType && { type: { not: params.excludeType as DocumentType } }),
       ...(params.confidentiality && { confidentiality: params.confidentiality as ConfidentialityLevel }),
       ...(tags?.length && { tags: { hasSome: tags } }),
     };
@@ -532,12 +534,12 @@ export async function documentRoutes(app: FastifyInstance) {
   );
 
   // ── POST /api/v1/documents/:id/upload-chunk ──────────
-  // Chunked upload handler for large files (5MB chunks)
+  // Chunked upload handler for large files (10MB chunks)
   app.post<{ Params: { id: string } }>(
     "/:id/upload-chunk",
     {
       preHandler: [requireEditor],
-      config: { rateLimit: { max: 100, timeWindow: "5m" } }, // More lenient for chunks
+      config: { rateLimit: { max: 600, timeWindow: "10m" } }, // 2100MB / 10MB chunks = 210 chunks max + retries
     },
     async (request, reply) => {
       const { id } = request.params;
@@ -548,120 +550,186 @@ export async function documentRoutes(app: FastifyInstance) {
       }
 
       const fields = data.fields as Record<string, { value: string }>;
-      const chunkIndex = parseInt(fields.chunkIndex?.value || "0");
-      const totalChunks = parseInt(fields.totalChunks?.value || "1");
-      const uploadSessionId = fields.uploadSessionId?.value || `session_${id}_${Date.now()}`;
+      const chunkIndex = parseInt(fields.chunkIndex?.value ?? "");
+      const totalChunks = parseInt(fields.totalChunks?.value ?? "");
+      const uploadSessionId = fields.uploadSessionId?.value;
       const fileName = fields.fileName?.value || "video.mp4";
-      const fileSize = parseInt(fields.fileSize?.value || "0");
+      const fileSize = parseInt(fields.fileSize?.value ?? "0");
+      const versionType = (fields.versionType?.value ?? "minor") as "major" | "minor" | "patch";
+      const changelog = fields.changelog?.value;
 
-      const document = await prisma.document.findFirst({ where: { id, isDeleted: false } });
-      if (!document) {
-        return reply.status(404).send({ statusCode: 404, error: "Not Found", message: "Document not found" });
+      // Validate required fields — all must arrive before the file part in the multipart stream
+      if (isNaN(chunkIndex) || isNaN(totalChunks) || !uploadSessionId) {
+        return reply.status(400).send({
+          statusCode: 400,
+          error: "Bad Request",
+          message: `Campos de chunk faltantes: chunkIndex=${fields.chunkIndex?.value}, totalChunks=${fields.totalChunks?.value}, uploadSessionId=${uploadSessionId}`,
+        });
       }
 
       // Create temp directory for chunks
       const chunkDir = path.join(UPLOAD_BASE, ".tmp", uploadSessionId);
       await fs.mkdir(chunkDir, { recursive: true });
 
-      const chunkPath = path.join(chunkDir, `chunk_${chunkIndex}`);
+      const chunkFile = path.join(chunkDir, `chunk_${chunkIndex}`);
 
       try {
-        // Save chunk
-        await pipeline(data.file, createWriteStream(chunkPath));
+        // Save chunk — no partial validation (ffprobe requires the complete file)
+        await pipeline(data.file, createWriteStream(chunkFile));
 
-        // If first chunk, validate video header
-        if (chunkIndex === 0) {
+        // Intermediate chunk: confirm receipt, no DB query needed
+        if (chunkIndex < totalChunks - 1) {
+          return reply.status(202).send({
+            uploadSessionId,
+            chunkIndex,
+            totalChunks,
+            message: `Chunk ${chunkIndex + 1} of ${totalChunks} received`,
+          });
+        }
+
+        // Last chunk: look up document, assemble, validate, create version
+        const document = await prisma.document.findFirst({
+          where: { id, isDeleted: false },
+          include: { versions: { orderBy: { createdAt: "desc" }, take: 1 } },
+        });
+        if (!document) {
+          await fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null);
+          return reply.status(404).send({ statusCode: 404, error: "Not Found", message: "Document not found" });
+        }
+
+        const origDir = path.join(UPLOAD_BASE, "videos", "originals");
+        await fs.mkdir(origDir, { recursive: true });
+
+        const ext = path.extname(fileName) || ".mp4";
+        const tempAssembled = path.join(origDir, `tmp_${uploadSessionId}${ext}`);
+
+        // Verificar que todos los chunks existen antes de ensamblar
+        for (let i = 0; i < totalChunks; i++) {
+          const chunkPath = path.join(chunkDir, `chunk_${i}`);
           try {
-            // Temporarily concat first chunk to check header
-            const tempPath = path.join(chunkDir, "temp_validation");
-            await pipeline(createReadStream(chunkPath), createWriteStream(tempPath));
-
-            // Try to validate (will work for complete files or first chunk only if format allows)
-            await validateVideoFile(tempPath);
-            await fs.unlink(tempPath).catch(() => null);
-          } catch (validationErr) {
-            // Clean up session on validation failure
-            await fs.rm(chunkDir, { recursive: true, force: true });
-            const errMsg = validationErr instanceof Error ? validationErr.message : String(validationErr);
+            await fs.access(chunkPath);
+          } catch {
             return reply.status(400).send({
               statusCode: 400,
               error: "Bad Request",
-              message: `Video validation failed: ${errMsg}. Upload cancelled.`,
+              message: `Chunk ${i} no encontrado. Reinicia la subida desde el principio.`,
             });
           }
         }
 
-        // Check if all chunks received
-        if (chunkIndex === totalChunks - 1) {
-          try {
-            // Assemble final file
-            const origDir = path.join(UPLOAD_BASE, "videos", "originals");
-            await fs.mkdir(origDir, { recursive: true });
-
-            const ext = path.extname(fileName) || ".mp4";
-            const versionId = `${id}_${Date.now()}`;
-            const finalPath = path.join(origDir, `${versionId}${ext}`);
-
-            // Concatenate all chunks using fs operations
-            const writeStream = createWriteStream(finalPath);
-            for (let i = 0; i < totalChunks; i++) {
-              const chunkPath = path.join(chunkDir, `chunk_${i}`);
-              const chunkData = await fs.readFile(chunkPath);
-              writeStream.write(chunkData);
-            }
-            await new Promise((resolve, reject) => {
-              writeStream.end(() => resolve(undefined));
-              writeStream.on("error", reject);
-            });
-
-            // Verify final file
-            const stat = await fs.stat(finalPath);
-            if (stat.size !== fileSize) {
-              await fs.unlink(finalPath).catch(() => null);
-              await fs.rm(chunkDir, { recursive: true, force: true });
-              return reply.status(400).send({
-                statusCode: 400,
-                error: "Bad Request",
-                message: `File size mismatch: expected ${fileSize}, got ${stat.size}`,
-              });
-            }
-
-            // Clean up chunk directory
-            await fs.rm(chunkDir, { recursive: true, force: true });
-
-            return reply.status(200).send({
-              uploadSessionId,
-              totalChunks,
-              finalPath,
-              fileSize: stat.size,
-              message: "All chunks received and assembled",
-            });
-          } catch (assemblyErr) {
-            await fs.rm(chunkDir, { recursive: true, force: true });
-            const errMsg = assemblyErr instanceof Error ? assemblyErr.message : String(assemblyErr);
-            return reply.status(500).send({
-              statusCode: 500,
-              error: "Internal Server Error",
-              message: `Failed to assemble chunks: ${errMsg}`,
-            });
-          }
+        // Concatenar chunks usando appendFile: correcto, sin backpressure, un chunk en memoria
+        await fs.writeFile(tempAssembled, Buffer.alloc(0));
+        for (let i = 0; i < totalChunks; i++) {
+          const chunkData = await fs.readFile(path.join(chunkDir, `chunk_${i}`));
+          await fs.appendFile(tempAssembled, chunkData);
         }
 
-        // Chunk saved, waiting for more
-        return reply.status(202).send({
-          uploadSessionId,
-          chunkIndex,
-          totalChunks,
-          message: `Chunk ${chunkIndex + 1} of ${totalChunks} received`,
+        // Validar tamaño
+        const stat = await fs.stat(tempAssembled);
+        if (fileSize > 0 && stat.size !== fileSize) {
+          await fs.unlink(tempAssembled).catch(() => null);
+          await fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null);
+          app.log.warn({ uploadSessionId, expected: fileSize, received: stat.size }, "upload-chunk: size mismatch");
+          return reply.status(400).send({
+            statusCode: 400,
+            error: "Bad Request",
+            message: `Tamaño incorrecto: esperado ${fileSize} bytes, recibido ${stat.size} bytes`,
+          });
+        }
+
+        // Validar video completo con ffprobe
+        let videoInfo;
+        try {
+          videoInfo = await validateVideoFile(tempAssembled);
+          if (!videoInfo) throw new Error("No se pudo leer el video");
+        } catch (validationErr) {
+          await fs.unlink(tempAssembled).catch(() => null);
+          await fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null);
+          const errMsg = validationErr instanceof Error ? validationErr.message : String(validationErr);
+          app.log.warn({ uploadSessionId, error: errMsg }, "upload-chunk: video validation failed");
+          return reply.status(400).send({
+            statusCode: 400,
+            error: "Bad Request",
+            message: `Video inválido: ${errMsg}`,
+          });
+        }
+
+        // Limpiar chunks ahora que la validación pasó
+        await fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null);
+
+        // Calcular versión semántica
+        const lastVersion = document.versions[0];
+        let newMajor = lastVersion?.versionMajor ?? 0;
+        let newMinor = lastVersion?.versionMinor ?? 0;
+        let newPatch = lastVersion?.versionPatch ?? 0;
+        if (versionType === "major") { newMajor++; newMinor = 0; newPatch = 0; }
+        else if (versionType === "minor") { newMinor++; newPatch = 0; }
+        else { newPatch++; }
+        const versionLabel = `${newMajor}.${newMinor}.${newPatch}`;
+
+        // Crear DocumentVersion
+        const version = await prisma.documentVersion.create({
+          data: {
+            documentId: id,
+            versionMajor: newMajor,
+            versionMinor: newMinor,
+            versionPatch: newPatch,
+            versionLabel,
+            changelog,
+            filePath: tempAssembled,
+            fileType: "VIDEO",
+            fileSize: stat.size,
+            mimeType: data.mimetype,
+            originalName: fileName,
+            createdById: request.user.id,
+          },
         });
+
+        // Renombrar con versionId definitivo
+        const finalPath = path.join(origDir, `${version.id}${ext}`);
+        await fs.rename(tempAssembled, finalPath);
+        await prisma.documentVersion.update({ where: { id: version.id }, data: { filePath: finalPath } });
+
+        // Actualizar versión actual del documento
+        await prisma.document.update({ where: { id }, data: { currentVersionId: version.id } });
+
+        // Crear VideoAsset y encolar
+        const videoAsset = await prisma.videoAsset.create({
+          data: {
+            documentVersionId: version.id,
+            originalPath: finalPath,
+            originalSize: stat.size,
+            originalFormat: ext.slice(1).toLowerCase(),
+            processingStatus: "PENDING",
+          },
+        });
+
+        await videoQueue.add("process-video", {
+          videoAssetId: videoAsset.id,
+          originalPath: finalPath,
+          documentVersionId: version.id,
+          userId: request.user.id,
+        }, { priority: 1 });
+
+        await createAuditLog({
+          userId: request.user.id,
+          action: "DOCUMENT_VERSION_UPLOADED",
+          entityType: "DocumentVersion",
+          entityId: version.id,
+          documentId: id,
+          documentVersionId: version.id,
+          metadata: { version: versionLabel, fileType: "VIDEO", fileSize: stat.size, videoAssetId: videoAsset.id, chunked: true },
+          request,
+        });
+
+        return reply.status(201).send({ ...version, videoAssetId: videoAsset.id, processingStatus: "PENDING" });
       } catch (err) {
-        // Clean up on error
-        await fs.rm(chunkDir, { recursive: true, force: true });
+        await fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null);
         const errMsg = err instanceof Error ? err.message : String(err);
         return reply.status(500).send({
           statusCode: 500,
           error: "Internal Server Error",
-          message: `Chunk upload failed: ${errMsg}`,
+          message: `Error ensamblando chunks: ${errMsg}`,
         });
       }
     }

@@ -28,7 +28,10 @@ export async function adminRoutes(app: FastifyInstance) {
       docsExpiringIn30,
       activeUsers7d,
       aiStats,
-      diskUsage,
+      docsBytesResult,
+      videosBytesResult,
+      totalUsers,
+      activeUsersCount,
     ] = await prisma.$transaction([
       prisma.document.groupBy({ by: ["status"], where: { isDeleted: false }, _count: { _all: true } }),
       prisma.document.groupBy({ by: ["type"], where: { isDeleted: false }, _count: { _all: true } }),
@@ -51,9 +54,22 @@ export async function adminRoutes(app: FastifyInstance) {
         _count: { _all: true },
         _sum: { tokensUsed: true },
       }),
-      // Disk usage aproximado
-      prisma.documentVersion.aggregate({ _sum: { fileSize: true } }),
+      prisma.documentVersion.aggregate({
+        where: { document: { type: { not: "VIDEO" }, isDeleted: false } },
+        _sum: { fileSize: true },
+      }),
+      prisma.documentVersion.aggregate({
+        where: { document: { type: "VIDEO", isDeleted: false } },
+        _sum: { fileSize: true },
+      }),
+      prisma.user.count({ where: { deletedAt: null } }),
+      prisma.user.count({ where: { isActive: true, deletedAt: null } }),
     ]);
+
+    // Derivar totales de documentos
+    const totalDocs = docsByStatus.reduce((sum, g) => sum + g._count._all, 0);
+    const publishedDocs = docsByStatus.find((g) => g.status === "PUBLICADO")?._count._all ?? 0;
+    const draftDocs = docsByStatus.find((g) => g.status === "BORRADOR")?._count._all ?? 0;
 
     // Accesos por día (últimos 7 días)
     const accessByDay = await prisma.auditLog.groupBy({
@@ -66,13 +82,20 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     return {
+      stats: {
+        documents: { total: totalDocs, published: publishedDocs, draft: draftDocs },
+        users: { total: totalUsers, active: activeUsersCount },
+        storage: {
+          documentsBytes: docsBytesResult._sum.fileSize || 0,
+          videosBytes: videosBytesResult._sum.fileSize || 0,
+        },
+      },
       documents: { byStatus: docsByStatus, byType: docsByType, expiringIn30: docsExpiringIn30 },
       users: { mostActive7d: activeUsers7d },
       ai: {
         totalSummaries: aiStats._count._all,
         totalTokens: aiStats._sum.tokensUsed || 0,
       },
-      storage: { totalBytes: diskUsage._sum.fileSize || 0 },
       access: { last7Days: accessByDay },
     };
   });
@@ -202,6 +225,163 @@ export async function adminRoutes(app: FastifyInstance) {
     const stat = await fs.stat(backupFile);
 
     return { file: backupFile, size: stat.size, timestamp };
+  });
+
+  // ── GET /api/v1/admin/cleanup (preview) ─────────────
+  app.get("/cleanup", { preHandler: [requireSuperAdmin] }, async () => {
+    const now = new Date();
+    const stuckCutoff = new Date(now.getTime() - 4 * 60 * 60 * 1000); // 4 horas
+    const notifCutoff = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+    const searchCutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    const STUCK_STATUSES = ["PENDING", "UPLOADING", "VALIDATING", "ENCODING", "GENERATING_HLS", "EXTRACTING_AUDIO", "TRANSCRIBING", "INDEXING"] as const;
+
+    const [
+      softDeletedDocs,
+      failedVideos,
+      stuckVideos,
+      expiredTokens,
+      oldNotifications,
+      oldSearchHistory,
+    ] = await prisma.$transaction([
+      prisma.document.count({ where: { isDeleted: true } }),
+      prisma.videoAsset.count({ where: { processingStatus: "FAILED" } }),
+      prisma.videoAsset.count({
+        where: { processingStatus: { in: [...STUCK_STATUSES] }, createdAt: { lt: stuckCutoff } },
+      }),
+      prisma.refreshToken.count({
+        where: { OR: [{ revokedAt: { not: null } }, { expiresAt: { lt: now } }] },
+      }),
+      prisma.notification.count({ where: { createdAt: { lt: notifCutoff } } }),
+      prisma.searchHistory.count({ where: { createdAt: { lt: searchCutoff } } }),
+    ]);
+
+    return {
+      preview: {
+        softDeletedDocuments: softDeletedDocs,
+        failedVideoAssets: failedVideos,
+        stuckVideoAssets: stuckVideos,
+        expiredTokens,
+        oldNotifications,
+        oldSearchHistory,
+      },
+      config: {
+        stuckThresholdHours: 4,
+        notificationsOlderThanDays: 90,
+        searchHistoryOlderThanDays: 30,
+      },
+    };
+  });
+
+  // ── POST /api/v1/admin/cleanup (ejecutar) ────────────
+  app.post("/cleanup", { preHandler: [requireSuperAdmin] }, async (request, reply) => {
+    const now = new Date();
+    const stuckCutoff = new Date(now.getTime() - 4 * 60 * 60 * 1000);
+    const notifCutoff = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+    const searchCutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    const STUCK_STATUSES = ["PENDING", "UPLOADING", "VALIDATING", "ENCODING", "GENERATING_HLS", "EXTRACTING_AUDIO", "TRANSCRIBING", "INDEXING"] as const;
+
+    const results = {
+      softDeletedDocuments: 0,
+      failedVideoAssets: 0,
+      stuckVideoAssets: 0,
+      expiredTokens: 0,
+      oldNotifications: 0,
+      oldSearchHistory: 0,
+      freedBytes: 0,
+      errors: [] as string[],
+    };
+
+    // ── 1. Documentos con isDeleted: true ──────────────
+    const softDeletedDocs = await prisma.document.findMany({
+      where: { isDeleted: true },
+      select: { id: true },
+    });
+    const softDeletedIds = softDeletedDocs.map((d) => d.id);
+
+    if (softDeletedIds.length > 0) {
+      const softDeletedVersions = await prisma.documentVersion.findMany({
+        where: { documentId: { in: softDeletedIds } },
+        select: { filePath: true, thumbnailPath: true, fileSize: true },
+      });
+      for (const v of softDeletedVersions) {
+        results.freedBytes += v.fileSize || 0;
+        await fs.unlink(v.filePath).catch(() => null);
+        if (v.thumbnailPath) await fs.unlink(v.thumbnailPath).catch(() => null);
+      }
+
+      // Eliminar registros sin cascade antes de borrar los documentos
+      await prisma.readConfirmation.deleteMany({ where: { documentId: { in: softDeletedIds } } });
+      await prisma.auditLog.updateMany({ where: { documentId: { in: softDeletedIds } }, data: { documentId: null } });
+      await prisma.aIChatSession.deleteMany({ where: { documentId: { in: softDeletedIds } } });
+      await prisma.approvalFlow.deleteMany({ where: { documentId: { in: softDeletedIds } } });
+      await prisma.accessPermission.deleteMany({ where: { documentId: { in: softDeletedIds } } });
+    }
+
+    const deletedDocs = await prisma.document.deleteMany({ where: { isDeleted: true } });
+    results.softDeletedDocuments = deletedDocs.count;
+
+    // ── 2. VideoAssets FAILED ──────────────────────────
+    const failedAssets = await prisma.videoAsset.findMany({
+      where: { processingStatus: "FAILED" },
+      select: { id: true, originalPath: true, hlsBasePath: true, thumbnailPath: true, originalSize: true },
+    });
+    for (const asset of failedAssets) {
+      results.freedBytes += asset.originalSize || 0;
+      await fs.unlink(asset.originalPath).catch(() => null);
+      if (asset.hlsBasePath) await fs.rm(asset.hlsBasePath, { recursive: true, force: true }).catch(() => null);
+      if (asset.thumbnailPath) await fs.unlink(asset.thumbnailPath).catch(() => null);
+    }
+    if (failedAssets.length > 0) {
+      const deleted = await prisma.videoAsset.deleteMany({ where: { processingStatus: "FAILED" } });
+      results.failedVideoAssets = deleted.count;
+    }
+
+    // ── 3. VideoAssets atascados (> 4h sin completar) ──
+    const stuckAssets = await prisma.videoAsset.findMany({
+      where: { processingStatus: { in: [...STUCK_STATUSES] }, createdAt: { lt: stuckCutoff } },
+      select: { id: true, originalPath: true, hlsBasePath: true, thumbnailPath: true, originalSize: true },
+    });
+    for (const asset of stuckAssets) {
+      results.freedBytes += asset.originalSize || 0;
+      await fs.unlink(asset.originalPath).catch(() => null);
+      if (asset.hlsBasePath) await fs.rm(asset.hlsBasePath, { recursive: true, force: true }).catch(() => null);
+      if (asset.thumbnailPath) await fs.unlink(asset.thumbnailPath).catch(() => null);
+    }
+    if (stuckAssets.length > 0) {
+      const deleted = await prisma.videoAsset.deleteMany({
+        where: { processingStatus: { in: [...STUCK_STATUSES] }, createdAt: { lt: stuckCutoff } },
+      });
+      results.stuckVideoAssets = deleted.count;
+    }
+
+    // ── 4. RefreshTokens expirados / revocados ─────────
+    const deletedTokens = await prisma.refreshToken.deleteMany({
+      where: { OR: [{ revokedAt: { not: null } }, { expiresAt: { lt: now } }] },
+    });
+    results.expiredTokens = deletedTokens.count;
+
+    // ── 5. Notificaciones antiguas ─────────────────────
+    const deletedNotifs = await prisma.notification.deleteMany({ where: { createdAt: { lt: notifCutoff } } });
+    results.oldNotifications = deletedNotifs.count;
+
+    // ── 6. Historial de búsqueda antiguo ──────────────
+    const deletedSearch = await prisma.searchHistory.deleteMany({ where: { createdAt: { lt: searchCutoff } } });
+    results.oldSearchHistory = deletedSearch.count;
+
+    // ── Registro de auditoría ──────────────────────────
+    await prisma.auditLog.create({
+      data: {
+        userId: request.user.id,
+        action: "SYSTEM_CONFIG_CHANGED",
+        entityType: "System",
+        entityId: "cleanup",
+        metadata: results as unknown as Parameters<typeof prisma.auditLog.create>[0]["data"]["metadata"],
+      },
+    });
+
+    return reply.status(200).send(results);
   });
 
   // ── GET /api/v1/admin/ai-usage ───────────────────────

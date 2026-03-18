@@ -61,7 +61,7 @@ function runFFmpegWithProgress(
 
 const FFMPEG = process.env.FFMPEG_BIN || "ffmpeg";
 const FFPROBE = process.env.FFMPEG_BIN?.replace("ffmpeg", "ffprobe") || "ffprobe";
-const THREADS = process.env.FFMPEG_THREADS || "4";
+const THREADS = process.env.FFMPEG_THREADS || "0"; // 0 = auto (usa todos los cores disponibles)
 const ADD_GPU_SUPPORT = process.env.ADD_GPU_SUPPORT !== "false"; // Auto-detect by default
 const UPLOAD_BASE = process.env.UPLOAD_BASE_PATH || "./uploads";
 
@@ -145,40 +145,75 @@ export async function videoProcessor(job: Job<VideoJobData>) {
 
     // Select video codec: NVENC (GPU) or libx264 (CPU)
     const videoCodec = useGPU ? "h264_nvenc" : "libx264";
-    const ffmpegPreset = useGPU ? "fast" : "medium"; // GPU preset
+    // veryfast: ~2x más rápido que medium, calidad aceptable para videos de formación internos
+    const ffmpegPreset = useGPU ? "fast" : "veryfast";
     const hlsStreams: string[] = [];
     const variantStreams: string[] = [];
 
-    for (let i = 0; i < resolutions.length; i++) {
-      const res = resolutions[i];
-      const resDir = path.join(hlsDir, res.name);
-      await fs.mkdir(resDir, { recursive: true });
+    // Crear directorios de salida
+    for (const res of resolutions) {
+      await fs.mkdir(path.join(hlsDir, res.name), { recursive: true });
+    }
 
-      // Rango de progreso para esta resolución: [rangeStart, rangeEnd]
-      const rangeStart = 20 + i * 15;
-      const rangeEnd = 20 + (i + 1) * 15;
-      await updateStatus("GENERATING_HLS", rangeStart);
+    await updateStatus("GENERATING_HLS", 20);
 
-      const ffmpegCmd =
-        `${FFMPEG} -i "${originalPath}" ` +
-        `-vf "scale=${res.scale}:force_original_aspect_ratio=decrease,pad=${res.scale}:(ow-iw)/2:(oh-ih)/2" ` +
-        `-c:v ${videoCodec} -b:v ${res.bitrate} -maxrate ${res.bitrate} -bufsize ${parseInt(res.bitrate) * 2}k ` +
-        (useGPU ? "" : `-preset ${ffmpegPreset} `) +
-        `-threads ${THREADS} ` +
-        `-c:a aac -b:a 128k -ar 44100 ` +
-        `-hls_time 6 -hls_list_size 0 -hls_segment_type mpegts ` +
-        `-hls_segment_filename "${resDir}/segment_%03d.ts" ` +
-        `"${resDir}/index.m3u8"`;
+    if (useGPU) {
+      // GPU: pasadas secuenciales (NVENC no soporta split filter fácilmente)
+      for (let i = 0; i < resolutions.length; i++) {
+        const res = resolutions[i];
+        const resDir = path.join(hlsDir, res.name);
+        const rangeStart = 20 + i * 15;
+        const rangeEnd = 20 + (i + 1) * 15;
+        await updateStatus("GENERATING_HLS", rangeStart);
 
-      await runFFmpegWithProgress(
-        ffmpegCmd,
-        duration,
-        async (fraction) => {
-          const percent = Math.round(rangeStart + fraction * (rangeEnd - rangeStart));
-          await updateStatus("GENERATING_HLS", percent);
-        }
-      );
+        const ffmpegCmd =
+          `${FFMPEG} -i "${originalPath}" ` +
+          `-vf "scale=${res.scale}:force_original_aspect_ratio=decrease,pad=${res.scale}:(ow-iw)/2:(oh-ih)/2" ` +
+          `-c:v ${videoCodec} -b:v ${res.bitrate} -maxrate ${res.bitrate} -bufsize ${parseInt(res.bitrate) * 2}k ` +
+          `-preset ${ffmpegPreset} -threads ${THREADS} ` +
+          `-c:a aac -b:a 128k -ar 44100 ` +
+          `-hls_time 6 -hls_list_size 0 -hls_segment_type mpegts ` +
+          `-hls_segment_filename "${resDir}/segment_%03d.ts" "${resDir}/index.m3u8"`;
 
+        await runFFmpegWithProgress(ffmpegCmd, duration, async (fraction) => {
+          await updateStatus("GENERATING_HLS", Math.round(rangeStart + fraction * (rangeEnd - rangeStart)));
+        });
+      }
+    } else {
+      // CPU: una sola pasada decodifica el video 1 vez y genera todas las resoluciones en paralelo
+      // Esto elimina el overhead de N decodificaciones secuenciales
+      const N = resolutions.length;
+      const splitParts = resolutions.map((_, i) => `[vs${i}]`).join("");
+      const scaleFilters = resolutions
+        .map((res, i) =>
+          `[vs${i}]scale=${res.scale}:force_original_aspect_ratio=decrease,pad=${res.scale}:(ow-iw)/2:(oh-ih)/2[vo${i}]`
+        )
+        .join(";");
+      const filterComplex = `[0:v]split=${N}${splitParts};${scaleFilters}`;
+
+      const outputArgs = resolutions
+        .map((res, i) => {
+          const resDir = path.join(hlsDir, res.name);
+          return (
+            `-map "[vo${i}]" -map 0:a ` +
+            `-c:v libx264 -preset ${ffmpegPreset} -crf 23 -maxrate ${res.bitrate} -bufsize ${parseInt(res.bitrate) * 2}k ` +
+            `-threads ${THREADS} ` +
+            `-c:a aac -b:a 128k -ar 44100 ` +
+            `-hls_time 6 -hls_list_size 0 -hls_segment_type mpegts ` +
+            `-hls_segment_filename "${resDir}/segment_%03d.ts" "${resDir}/index.m3u8"`
+          );
+        })
+        .join(" ");
+
+      const ffmpegCmd = `${FFMPEG} -i "${originalPath}" -filter_complex "${filterComplex}" ${outputArgs}`;
+
+      await runFFmpegWithProgress(ffmpegCmd, duration, async (fraction) => {
+        // Una sola pasada: 20% → 65%
+        await updateStatus("GENERATING_HLS", Math.round(20 + fraction * 45));
+      });
+    }
+
+    for (const res of resolutions) {
       hlsStreams.push(res.name);
       variantStreams.push(
         `#EXT-X-STREAM-INF:BANDWIDTH=${parseInt(res.bitrate) * 1000},RESOLUTION=${res.scale.replace(":", "x")}\n${res.name}/index.m3u8`

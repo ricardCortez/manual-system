@@ -172,7 +172,7 @@ export async function aiRoutes(app: FastifyInstance) {
       return prisma.aISummary.findMany({
         where: {
           documentVersionId: request.params.versionId,
-          status: "DONE",
+          status: { in: ["DONE", "FAILED"] },
         },
         orderBy: { createdAt: "desc" },
       });

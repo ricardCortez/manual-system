@@ -51,16 +51,24 @@ export function SummaryPanel({ documentVersionId, isOutdated, onChatOpen }: Summ
   const [copied, setCopied] = useState(false);
   const queryClient = useQueryClient();
 
-  // Cargar resúmenes existentes
+  // Cargar resúmenes existentes; sondear cada 3s mientras haya un job en proceso
   const { data: summaries = [] } = useQuery<AISummary[]>({
     queryKey: ["ai-summaries", documentVersionId],
     queryFn: () => api.get(`/ai/summaries/${documentVersionId}`).then((r) => r.data),
+    refetchInterval: streamingText !== null ? 3000 : false,
   });
 
   // Resumen activo para mostrar
   const activeSummary = activeSummaryId
     ? summaries.find((s) => s.id === activeSummaryId)
     : summaries.find((s) => s.summaryType === selectedType && s.summaryLength === selectedLength && s.status === "DONE");
+
+  // Fallback: si el polling encontró el resultado, limpiar streamingText
+  useEffect(() => {
+    if (streamingText !== null && activeSummary && (activeSummary.status === "DONE" || activeSummary.status === "FAILED")) {
+      setStreamingText(null);
+    }
+  }, [activeSummary, streamingText]);
 
   // Escuchar progreso por WebSocket
   useEffect(() => {
@@ -95,6 +103,9 @@ export function SummaryPanel({ documentVersionId, isOutdated, onChatOpen }: Summ
       setShowConfig(false);
       if (data.isNew) setStreamingText("En cola...");
       queryClient.invalidateQueries({ queryKey: ["ai-summaries", documentVersionId] });
+    },
+    onError: () => {
+      setStreamingText(null);
     },
   });
 
@@ -267,8 +278,15 @@ export function SummaryPanel({ documentVersionId, isOutdated, onChatOpen }: Summ
           </p>
         )}
 
+        {/* Error al solicitar */}
+        {!streamingText && generateMutation.isError && !activeSummary && (
+          <p className="text-sm" style={{ color: "var(--status-obsolete)" }}>
+            {(generateMutation.error as { response?: { data?: { message?: string } } })?.response?.data?.message ?? "Error al generar el resumen. Intenta de nuevo."}
+          </p>
+        )}
+
         {/* Sin resumen todavía */}
-        {!streamingText && !activeSummary && !generateMutation.isPending && (
+        {!streamingText && !activeSummary && !generateMutation.isPending && !generateMutation.isError && (
           <div className="text-center py-4">
             <Sparkles size={24} className="mx-auto mb-2" style={{ color: "var(--ai-primary)", opacity: 0.5 }} />
             <p className="text-sm" style={{ color: "var(--text-tertiary)" }}>

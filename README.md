@@ -7,6 +7,7 @@ Sistema web empresarial completo para gestión, visualización y control de manu
 ## Tabla de Contenidos
 
 - [Características](#características)
+- [Novedades](#novedades)
 - [Arquitectura](#arquitectura)
 - [Stack Tecnológico](#stack-tecnológico)
 - [Estructura del Proyecto](#estructura-del-proyecto)
@@ -64,8 +65,46 @@ Sistema web empresarial completo para gestión, visualización y control de manu
 - Monitoreo visual de colas de trabajos (Bull Board)
 - Gestión de usuarios y áreas organizativas
 - Logs de auditoría inmutables
-- Configuración del sistema en caliente
+- Configuración del sistema en caliente (`.env.override`)
 - Gestión de backups
+
+---
+
+## Novedades
+
+### Pixel Agents — Extensión de VS Code
+Integración visual con **Pixel Agents**, una extensión de VS Code que visualiza agentes de Claude Code como personajes de pixel art en una oficina interactiva:
+
+- **Personajes animados**: Cada agente aparece como un personaje único con animaciones (escribiendo, leyendo, esperando)
+- **Oficina personalizable**: Diseña el espacio de trabajo con herramientas visuales (muebles, colores, distribución)
+- **Tracking en tiempo real**: Los personajes reflejan la actividad del agente (qué herramientas usa, si espera permiso)
+- **Persistencia**: El diseño de la oficina se guarda automáticamente entre sesiones
+- **Integración con Claude Code**: Funciona nativamente con Claude Code terminal
+
+Para más info: `pixel-agents/README.md`
+
+### Mejoras Recientes
+
+#### Backend
+- **Runtime env override**: Archivo `.env.override` permite cambiar variables de entorno sin reconstruir el contenedor
+- **HMR WebSocket**: Soporte mejorado para Vite hot-reload a través de Nginx
+- **React Router Future Flags**: Compatibilidad con React Router v7+
+- **Fastify v4 Hooks**: Migraciones a nuevos estándares de Fastify
+
+#### Frontend
+- **Dashboard**: Panel de control con estadísticas principales
+- **Páginas completadas**:
+  - Visor de documentos (`DocumentViewerPage`)
+  - Gestor de documentos (`DocumentsPage`)
+  - Gestor de videos (`VideosPage`)
+  - Panel de búsqueda (`SearchPage`)
+  - Gestión de áreas (`AreasPage`)
+  - Admin dashboard y configuración
+
+#### Nginx
+- **Mejor soporte para HLS**: Optimizaciones de streaming
+- **WebSocket upgrade maps**: Soporte mejorado para Socket.io y HMR
+- **Rate limiting**: Configuración de límites de velocidad en nivel HTTP
 
 ---
 
@@ -135,19 +174,20 @@ manual-system/
 ├── backend/
 │   ├── src/
 │   │   ├── app.ts                    # Entrada principal de la API
+│   │   ├── .env.override             # (opcional) Override de vars de entorno en runtime
 │   │   ├── modules/
 │   │   │   ├── auth/                 # JWT, login, refresh tokens
 │   │   │   ├── users/                # Gestión de usuarios (RBAC)
 │   │   │   ├── areas/                # Jerarquía organizativa
 │   │   │   ├── documents/            # Documentos y versiones
 │   │   │   ├── videos/               # Upload, HLS, transcripción
-│   │   │   ├── ai/                   # Resúmenes y chat RAG
+│   │   │   ├── ai/                   # Resúmenes y chat RAG (Ollama/OpenAI/Claude)
 │   │   │   ├── search/               # MeiliSearch
 │   │   │   ├── notifications/        # Notificaciones en tiempo real
 │   │   │   └── admin/                # Panel de administración
 │   │   ├── jobs/
-│   │   │   ├── video.processor.job.ts
-│   │   │   ├── ai.summary.job.ts
+│   │   │   ├── video.processor.job.ts # FFmpeg, HLS encoding, thumbnails
+│   │   │   ├── ai.summary.job.ts      # Generación de resúmenes
 │   │   │   └── notifications.job.ts
 │   │   ├── middleware/
 │   │   │   ├── auth.middleware.ts
@@ -159,22 +199,55 @@ manual-system/
 │   │   └── migrations/
 │   └── uploads/                      # Almacenamiento de archivos
 │       ├── documents/
-│       ├── videos/hls/               # Segmentos HLS
+│       ├── videos/hls/               # Segmentos HLS (adaptive bitrate)
 │       └── temp/
 │
 ├── frontend/
 │   └── src/
-│       ├── pages/                    # LoginPage, Dashboard, Documentos, etc.
-│       ├── components/               # UI reutilizable, viewers, AI
-│       ├── stores/                   # Zustand (auth, UI)
-│       └── lib/                      # api.ts, socket.ts
+│       ├── pages/
+│       │   ├── LoginPage.tsx
+│       │   ├── DashboardPage.tsx      # Panel principal con estadísticas
+│       │   ├── DocumentsPage.tsx      # Gestor y navegador de documentos
+│       │   ├── DocumentViewerPage.tsx # Visor de documentos (PDF, texto, etc)
+│       │   ├── VideosPage.tsx         # Gestor de videos y streaming
+│       │   ├── SearchPage.tsx         # Búsqueda de texto completo
+│       │   ├── AreasPage.tsx          # Gestión de áreas organizativas
+│       │   └── admin/                 # Panel administrativo
+│       │       ├── AdminDashboard.tsx
+│       │       ├── AdminConfig.tsx
+│       │       └── AdminUsers.tsx
+│       ├── components/                # UI reutilizable
+│       │   ├── ai/SummaryPanel.tsx   # Resúmenes IA
+│       │   ├── viewers/               # PDF, video, código
+│       │   └── ...
+│       ├── stores/                    # Zustand (auth, UI)
+│       └── lib/                       # api.ts, socket.ts
+│
+├── pixel-agents/                      # Extensión de VS Code
+│   ├── src/                          # Backend de la extensión
+│   │   ├── extension.ts              # Punto de entrada
+│   │   ├── agentManager.ts           # Ciclo de vida de agentes
+│   │   ├── PixelAgentsViewProvider.ts # Webview provider
+│   │   ├── fileWatcher.ts            # Monitoring de sesiones
+│   │   ├── transcriptParser.ts       # Parsing de JSONL
+│   │   └── ...
+│   ├── webview-ui/                   # UI React (pixel art office)
+│   │   ├── src/
+│   │   │   ├── App.tsx
+│   │   │   ├── office/               # Motor de renderizado
+│   │   │   ├── components/           # React components
+│   │   │   └── hooks/
+│   │   └── public/
+│   │       ├── assets/               # Sprites, muebles, personajes
+│   │       └── default-layout.json   # Layout por defecto
+│   └── scripts/                       # Asset pipeline (PNG→sprites)
 │
 ├── ai-service/
 │   ├── prompts/                      # Plantillas de prompts (RAG, summary)
 │   └── ollama/docker-compose.ollama.yml
 │
 ├── nginx/
-│   ├── nginx.conf
+│   ├── nginx.conf                    # Proxy inverso + HLS + WebSocket
 │   └── ssl/                          # cert.pem + key.pem
 │
 ├── docker-compose.yml                # Stack de desarrollo
@@ -274,7 +347,7 @@ npm run search:index
 
 ### Variables de Entorno Principales
 
-**`backend/.env`**
+**`backend/.env`** (ó `.env.override` para cambios en runtime)
 
 ```env
 # Base de datos
@@ -318,6 +391,19 @@ AI_CHAT_DAILY_LIMIT=50
 # Tamaños máximos de subida
 MAX_VIDEO_SIZE_MB=2048
 MAX_DOCUMENT_SIZE_MB=500
+
+# Node environment
+NODE_ENV=production
+```
+
+**`backend/.env.override`** (Opcional, runtime)
+
+Crear este archivo permite cambiar variables de entorno sin reconstruir el contenedor:
+
+```env
+# Ejemplo: cambiar modelo de IA en tiempo de ejecución
+AI_MODE=EXTERNAL
+ANTHROPIC_MODEL=claude-opus-4-6
 ```
 
 **`frontend/.env`**
@@ -510,6 +596,8 @@ npm run search:index
 
 ## Desarrollo Local
 
+### Manual System (Backend + Frontend)
+
 ```bash
 # Backend (con hot reload)
 cd backend
@@ -525,6 +613,26 @@ npm run dev   # :5173
 docker-compose up -d postgres redis meilisearch
 ```
 
+### Pixel Agents (Extensión de VS Code)
+
+```bash
+# Instalar dependencias
+cd pixel-agents
+npm install
+cd webview-ui && npm install && cd ..
+
+# Modo watch (desarrollo)
+npm run watch
+
+# Build para VSX (release)
+npm run package
+
+# Ejecutar en Extension Dev Host
+# Press F5 en VS Code
+```
+
+Para más detalles sobre desarrollo de Pixel Agents, ver: `pixel-agents/README.md` y `pixel-agents/CLAUDE.md`
+
 ### Tests
 
 ```bash
@@ -536,16 +644,57 @@ npm run test:coverage # Con reporte de cobertura
 ### Linting y Types
 
 ```bash
+# Backend
+cd backend
 npm run lint       # ESLint
 npm run typecheck  # tsc sin emit
+
+# Frontend
+cd frontend
+npm run lint       # ESLint
+npm run typecheck
+
+# Pixel Agents
+cd pixel-agents
+npm run lint
+npm run check-types
 ```
+
+---
+
+## Pixel Agents — Extensión de VS Code Incluida
+
+Este repositorio incluye **Pixel Agents**, una extensión de VS Code que visualiza agentes Claude Code como personajes de pixel art en una oficina interactiva.
+
+**Características:**
+- 🎮 Personajes animados que reflejan la actividad de cada agente
+- 🏢 Oficina personalizable con editor visual integrado
+- 🎬 Animaciones en tiempo real (escribiendo, leyendo, esperando)
+- 💾 Persistencia automática de diseños entre sesiones
+- 🌈 6 personajes diversos con paletas de colores personalizables
+
+**Instalación:**
+1. Copiar `pixel-agents` a `~/.vscode/extensions/pixel-agents` o instalar desde VSX
+2. Ejecutar en VS Code: F5 para Extension Dev Host
+3. Abrir un terminal Claude Code y ver el personaje aparecer
+
+**Documentación:**
+- `pixel-agents/README.md` — Overview y características
+- `pixel-agents/CLAUDE.md` — Guía técnica completa de arquitectura
+
+**Repositorio:**
+- GitHub: https://github.com/pablodelucca/pixel-agents
 
 ---
 
 ## Licencia
 
-Uso interno corporativo. Todos los derechos reservados.
+**Manual System**: Uso interno corporativo. Todos los derechos reservados.
+
+**Pixel Agents**: Licenciado bajo MIT. Ver `pixel-agents/LICENSE`.
 
 ---
 
 *Desarrollado para despliegue en intranet empresarial. Para soporte o reportar problemas, abrir un issue en el repositorio interno.*
+
+**Última actualización:** 2026-03-18

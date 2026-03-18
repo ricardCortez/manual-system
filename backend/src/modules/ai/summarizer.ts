@@ -89,11 +89,11 @@ export async function generateSummary(params: {
     // Unir textos de documentos comparados
     const allTexts = [params.text, ...params.compareTexts];
     documentText = allTexts
-      .map((t, i) => `--- DOCUMENTO ${i + 1} ---\n${t.slice(0, 15000)}`)
+      .map((t, i) => `--- DOCUMENTO ${i + 1} ---\n${t.slice(0, 4000)}`)
       .join("\n\n");
-  } else if (params.text.length > 100000) {
-    // Documentos muy largos: chunking + resumen de resúmenes
-    const chunks = chunkText(params.text, 30000);
+  } else if (params.text.length > 12000) {
+    // Documentos largos: chunking + resumen de resúmenes adaptado al contexto del modelo
+    const chunks = chunkText(params.text, 8000);
     const chunkSummaries: string[] = [];
 
     for (const chunk of chunks) {
@@ -109,7 +109,7 @@ export async function generateSummary(params: {
   // Construir prompt final
   const promptTemplate = typePrompts[params.summaryType];
   const prompt = promptTemplate
-    .replace("{text}", documentText.slice(0, 50000))
+    .replace("{text}", documentText.slice(0, 10000)) // ~2500 tokens, deja margen para prompt+respuesta en num_ctx=4096
     .replace("{length_instruction}", lengthInstruction);
 
   return callAI(provider, prompt);

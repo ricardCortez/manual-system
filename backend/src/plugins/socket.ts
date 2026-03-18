@@ -18,7 +18,7 @@ export const socketServer = {
 
     io = new SocketIOServer(httpServer, {
       cors: {
-        origin: process.env.APP_URL || "https://manuals.empresa.local",
+        origin: true, // Auth via JWT — CORS abierto para acceso por IP o hostname en LAN
         credentials: true,
       },
       path: "/socket.io",

@@ -49,6 +49,8 @@ export const videoWorker = new Worker(
   {
     connection: redis,
     concurrency: 2, // Máximo 2 videos procesando a la vez
+    lockDuration: 3600000, // 1 hora — ffmpeg puede tardar mucho en CPU
+    stalledInterval: 60000, // Revisar stalled jobs cada 1 min (no 30s)
   }
 );
 
@@ -58,6 +60,7 @@ export const aiWorker = new Worker(
   {
     connection: redis,
     concurrency: parseInt(process.env.AI_MAX_CONCURRENT_JOBS || "3"),
+    lockDuration: 300000, // 5 minutes — LLM on CPU can be slow
   }
 );
 
