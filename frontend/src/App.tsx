@@ -16,6 +16,7 @@ const AdminDashboard   = lazy(() => import("@/pages/admin/AdminDashboard").then(
 const AdminUsers       = lazy(() => import("@/pages/admin/AdminUsers").then((m) => ({ default: m.AdminUsers })));
 const AdminAreas       = lazy(() => import("@/pages/admin/AdminAreas").then((m) => ({ default: m.AdminAreas })));
 const AdminConfig      = lazy(() => import("@/pages/admin/AdminConfig").then((m) => ({ default: m.AdminConfig })));
+const AdminReadControl = lazy(() => import("@/pages/admin/AdminReadControl").then((m) => ({ default: m.AdminReadControl })));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -122,6 +123,14 @@ export default function App() {
               element={
                 <Suspense fallback={<PageLoader />}>
                   <AdminConfig />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/admin/control-lectura"
+              element={
+                <Suspense fallback={<PageLoader />}>
+                  <AdminReadControl />
                 </Suspense>
               }
             />

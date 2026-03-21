@@ -384,6 +384,107 @@ export async function adminRoutes(app: FastifyInstance) {
     return reply.status(200).send(results);
   });
 
+  // ── GET /api/v1/admin/read-control ──────────────────
+  // Lista documentos con estadísticas de confirmación de lectura
+  app.get("/read-control", async (request) => {
+    const [documents, totalActiveUsers] = await Promise.all([
+      prisma.document.findMany({
+        where: { isDeleted: false, type: { not: "VIDEO" } },
+        select: {
+          id: true,
+          title: true,
+          type: true,
+          status: true,
+          createdAt: true,
+          area: { select: { id: true, name: true } },
+          _count: { select: { readConfirmations: true } },
+        },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.user.count({ where: { deletedAt: null, isActive: true } }),
+    ]);
+
+    return documents.map((doc) => ({
+      id: doc.id,
+      title: doc.title,
+      type: doc.type,
+      status: doc.status,
+      createdAt: doc.createdAt,
+      area: doc.area,
+      readCount: doc._count.readConfirmations,
+      totalUsers: totalActiveUsers,
+      pendingCount: Math.max(0, totalActiveUsers - doc._count.readConfirmations),
+      readPercent:
+        totalActiveUsers > 0
+          ? Math.round((doc._count.readConfirmations / totalActiveUsers) * 100)
+          : 0,
+    }));
+  });
+
+  // ── GET /api/v1/admin/read-control/:docId/users ──────
+  // Retorna el estado de lectura por usuario para un documento específico
+  app.get<{ Params: { docId: string } }>(
+    "/read-control/:docId/users",
+    async (request) => {
+      const { docId } = request.params;
+      const { areaId, status } = request.query as {
+        areaId?: string;
+        status?: "read" | "pending";
+      };
+
+      const [document, users, confirmations] = await Promise.all([
+        prisma.document.findUnique({
+          where: { id: docId },
+          select: { id: true, title: true, type: true, status: true },
+        }),
+        prisma.user.findMany({
+          where: {
+            deletedAt: null,
+            isActive: true,
+            ...(areaId && { areaId }),
+          },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            role: true,
+            jobTitle: true,
+            area: { select: { id: true, name: true } },
+          },
+          orderBy: { name: "asc" },
+        }),
+        prisma.readConfirmation.findMany({
+          where: { documentId: docId },
+          select: {
+            userId: true,
+            confirmedAt: true,
+            documentVersion: { select: { version: true } },
+          },
+        }),
+      ]);
+
+      const confirmMap = new Map(confirmations.map((c) => [c.userId, c]));
+
+      const result = users
+        .map((u) => {
+          const conf = confirmMap.get(u.id);
+          return {
+            ...u,
+            hasRead: !!conf,
+            confirmedAt: conf?.confirmedAt ?? null,
+            confirmedVersion: conf?.documentVersion?.version ?? null,
+          };
+        })
+        .filter((u) => {
+          if (status === "read") return u.hasRead;
+          if (status === "pending") return !u.hasRead;
+          return true;
+        });
+
+      return { document, users: result };
+    }
+  );
+
   // ── GET /api/v1/admin/ai-usage ───────────────────────
   app.get("/ai-usage", async (request) => {
     const { from, to, userId } = request.query as { from?: string; to?: string; userId?: string };
