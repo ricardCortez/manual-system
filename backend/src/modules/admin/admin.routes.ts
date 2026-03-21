@@ -458,21 +458,22 @@ export async function adminRoutes(app: FastifyInstance) {
           select: {
             userId: true,
             confirmedAt: true,
-            documentVersion: { select: { version: true } },
+            documentVersion: { select: { versionLabel: true } },
           },
         }),
       ]);
 
-      const confirmMap = new Map(confirmations.map((c) => [c.userId, c]));
+      type ConfEntry = { userId: string; confirmedAt: Date; documentVersion: { versionLabel: string } | null };
+      const confirmMap = new Map<string, ConfEntry>(confirmations.map((c: ConfEntry) => [c.userId, c]));
 
       const result = users
-        .map((u) => {
+        .map((u: typeof users[number]) => {
           const conf = confirmMap.get(u.id);
           return {
             ...u,
             hasRead: !!conf,
             confirmedAt: conf?.confirmedAt ?? null,
-            confirmedVersion: conf?.documentVersion?.version ?? null,
+            confirmedVersion: conf?.documentVersion?.versionLabel ?? null,
           };
         })
         .filter((u) => {

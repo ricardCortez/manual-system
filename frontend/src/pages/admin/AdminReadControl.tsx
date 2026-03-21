@@ -107,11 +107,13 @@ export function AdminReadControl() {
 
   // Stats globales
   const totalDocs = docs.length;
-  const totalConfirmed = docs.reduce((s, d) => s + d.readCount, 0);
-  const totalPending = docs.reduce((s, d) => s + d.pendingCount, 0);
-  const overallPercent =
-    totalDocs > 0 && docs[0]?.totalUsers > 0
-      ? Math.round((totalConfirmed / (totalDocs * docs[0].totalUsers)) * 100)
+  const totalUsers = docs[0]?.totalUsers ?? 0;
+  // Docs con lectura 100% completada (todos los usuarios confirmaron)
+  const docsCompletos = docs.filter((d) => d.readPercent === 100).length;
+  // Promedio de completitud: media del % de cada documento
+  const avgPercent =
+    totalDocs > 0
+      ? Math.round(docs.reduce((s, d) => s + d.readPercent, 0) / totalDocs)
       : 0;
 
   const filteredDocs = docs.filter((d) =>
@@ -149,23 +151,23 @@ export function AdminReadControl() {
               color: "text-blue-600 bg-blue-50",
             },
             {
-              label: "Usuarios totales",
-              value: docs[0]?.totalUsers ?? 0,
-              sub: "activos en el sistema",
+              label: "Usuarios activos",
+              value: totalUsers,
+              sub: "en el sistema",
               icon: <Users className="w-5 h-5" />,
               color: "text-purple-600 bg-purple-50",
             },
             {
-              label: "Confirmaciones",
-              value: totalConfirmed,
-              sub: "lecturas registradas",
+              label: "Completados al 100%",
+              value: `${docsCompletos} / ${totalDocs}`,
+              sub: "documentos leídos por todos",
               icon: <CheckCircle2 className="w-5 h-5" />,
               color: "text-green-600 bg-green-50",
             },
             {
-              label: "Pendientes",
-              value: totalPending,
-              sub: "lecturas sin confirmar",
+              label: "Promedio de lectura",
+              value: `${avgPercent}%`,
+              sub: "sobre todos los documentos",
               icon: <Clock className="w-5 h-5" />,
               color: "text-orange-600 bg-orange-50",
             },
