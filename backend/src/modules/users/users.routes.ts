@@ -112,43 +112,116 @@ export async function userRoutes(app: FastifyInstance) {
 
   // ── POST /api/v1/users/import — CSV masivo ───────────
   app.post("/import", { preHandler: [requireAdmin] }, async (request, reply) => {
-    const data = await request.file();
-    if (!data) return reply.status(400).send({ statusCode: 400, error: "Bad Request", message: "No se recibió archivo CSV" });
-
-    const content = await data.toBuffer();
-    const lines = content.toString("utf-8").split("\n").slice(1); // Omitir header
-
-    const results = { created: 0, skipped: 0, errors: [] as string[] };
     const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || "12");
-    const DEFAULT_PASSWORD = "Temporal123!";
+    const VALID_ROLES = ["SUPER_ADMIN", "ADMIN_AREA", "EDITOR", "REVISOR", "VISUALIZADOR"];
 
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      const [name, email, role, areaCode] = line.split(",").map((v) => v.trim().replace(/"/g, ""));
+    // Generar contraseña segura: mayúscula + minúsculas + dígitos + símbolo
+    function generatePassword(): string {
+      const upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+      const lower = "abcdefghjkmnpqrstuvwxyz";
+      const digits = "23456789";
+      const symbols = "!@#$%&*";
+      const rand = (s: string) => s[Math.floor(Math.random() * s.length)];
+      const base = [rand(upper), rand(upper), rand(lower), rand(lower), rand(lower),
+                    rand(digits), rand(digits), rand(symbols)];
+      // Mezclar aleatoriamente
+      for (let i = base.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [base[i], base[j]] = [base[j], base[i]];
+      }
+      return base.join("");
+    }
+
+    // Leer todas las partes del multipart (archivo + campos)
+    let csvBuffer: Buffer | null = null;
+    let defaultRole = "VISUALIZADOR";
+    let defaultAreaId: string | undefined;
+
+    const parts = request.parts();
+    for await (const part of parts) {
+      if (part.type === "file" && part.fieldname === "file") {
+        csvBuffer = await part.toBuffer();
+      } else if (part.type === "field") {
+        if (part.fieldname === "defaultRole") defaultRole = String(part.value);
+        if (part.fieldname === "defaultAreaId") defaultAreaId = String(part.value) || undefined;
+      }
+    }
+
+    if (!csvBuffer) {
+      return reply.status(400).send({ statusCode: 400, error: "Bad Request", message: "No se recibió archivo CSV" });
+    }
+
+    if (!VALID_ROLES.includes(defaultRole)) defaultRole = "VISUALIZADOR";
+
+    const lines = csvBuffer.toString("utf-8").split("\n").slice(1); // omitir header
+    const results = {
+      created: 0,
+      skipped: 0,
+      errors: [] as string[],
+      users: [] as { name: string; email: string; role: string; area: string; password: string }[],
+    };
+
+    // Pre-cargar áreas por código para evitar N queries
+    const allAreas = await prisma.area.findMany({ select: { id: true, code: true, name: true } });
+    const areaByCode = new Map(allAreas.map((a) => [a.code.toUpperCase(), a]));
+    const areaById = new Map(allAreas.map((a) => [a.id, a]));
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+
+      // Soporte CSV con o sin comillas
+      const cols = line.split(",").map((v) => v.trim().replace(/^"|"$/g, ""));
+      const [name, email, roleCol, areaCol] = cols;
+
+      if (!name || !email) {
+        results.errors.push(`Fila ignorada — nombre o correo vacío: "${line}"`);
+        continue;
+      }
+
+      // Rol: columna CSV > default seleccionado
+      const role = (roleCol && VALID_ROLES.includes(roleCol.toUpperCase())
+        ? roleCol.toUpperCase()
+        : defaultRole) as Parameters<typeof prisma.user.create>[0]["data"]["role"];
+
+      // Área: columna CSV (por código) > default seleccionado > null
+      let areaId: string | undefined = defaultAreaId;
+      let areaName = areaId ? (areaById.get(areaId)?.name ?? "—") : "—";
+      if (areaCol) {
+        const foundArea = areaByCode.get(areaCol.toUpperCase());
+        if (foundArea) { areaId = foundArea.id; areaName = foundArea.name; }
+      }
 
       try {
-        const area = areaCode ? await prisma.area.findUnique({ where: { code: areaCode } }) : null;
         const exists = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
-
         if (exists) { results.skipped++; continue; }
 
+        const password = generatePassword();
         await prisma.user.create({
           data: {
             name,
             email: email.toLowerCase(),
-            role: (role || "VISUALIZADOR") as Parameters<typeof prisma.user.create>[0]["data"]["role"],
-            areaId: area?.id,
-            passwordHash: await bcrypt.hash(DEFAULT_PASSWORD, BCRYPT_ROUNDS),
+            role,
+            areaId,
+            passwordHash: await bcrypt.hash(password, BCRYPT_ROUNDS),
+            passwordChangedAt: new Date(),
           },
         });
+
         results.created++;
+        results.users.push({ name, email: email.toLowerCase(), role, area: areaName, password });
       } catch (e) {
-        results.errors.push(`Línea "${line}": ${e instanceof Error ? e.message : String(e)}`);
+        results.errors.push(`"${name}" <${email}>: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
 
-    await createAuditLog({ userId: request.user.id, action: "USER_CREATED", metadata: { import: results }, request });
-    return results;
+    await createAuditLog({
+      userId: request.user.id,
+      action: "USER_CREATED",
+      metadata: { import: { created: results.created, skipped: results.skipped } },
+      request,
+    });
+    return reply.send(results);
   });
 
   // ── PATCH /api/v1/users/:id ──────────────────────────

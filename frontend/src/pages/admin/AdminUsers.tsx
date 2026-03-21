@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Users, Search, Shield, UserCheck, UserX, Plus, Pencil, X } from "lucide-react";
+import { Users, Search, Shield, UserCheck, UserX, Plus, Pencil, X, Upload, Download, FileText, CheckCircle2, AlertCircle } from "lucide-react";
 import api from "@/lib/api";
 import { useIsAdmin } from "@/stores/auth.store";
 import { Navigate } from "react-router-dom";
@@ -284,12 +284,301 @@ function UserEditModal({
   );
 }
 
+interface ImportedUser {
+  name: string;
+  email: string;
+  role: string;
+  area: string;
+  password: string;
+}
+
+interface ImportResult {
+  created: number;
+  skipped: number;
+  errors: string[];
+  users: ImportedUser[];
+}
+
+function CsvImportModal({
+  areas,
+  onClose,
+}: {
+  areas: Area[];
+  onClose: () => void;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [defaultRole, setDefaultRole] = useState("VISUALIZADOR");
+  const [defaultAreaId, setDefaultAreaId] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<ImportResult | null>(null);
+  const [error, setError] = useState("");
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  async function handleImport() {
+    if (!file) { setError("Selecciona un archivo CSV"); return; }
+    setLoading(true);
+    setError("");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("defaultRole", defaultRole);
+      if (defaultAreaId) fd.append("defaultAreaId", defaultAreaId);
+      const res = await api.post("/users/import", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setResult(res.data);
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      setError(msg ?? "Error al importar");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function downloadCredentials() {
+    if (!result) return;
+    const header = "Nombre,Correo,Rol,Área,Contraseña";
+    const rows = result.users.map(
+      (u) => `"${u.name}","${u.email}","${u.role}","${u.area}","${u.password}"`
+    );
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `credenciales_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadTemplate() {
+    const csv = "nombre,correo,rol,codigo_area\nJuan Pérez,juan@empresa.com,VISUALIZADOR,RRHH\nMaría López,maria@empresa.com,EDITOR,TI";
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "plantilla_usuarios.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 shrink-0">
+          <div className="flex items-center gap-2">
+            <Upload size={18} className="text-blue-600" />
+            <h2 className="font-semibold text-gray-800">Importar usuarios desde CSV</h2>
+          </div>
+          <button onClick={onClose} className="p-1 rounded hover:bg-gray-100">
+            <X size={18} className="text-gray-500" />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto flex-1">
+          {!result ? (
+            <div className="p-6 space-y-5">
+              {/* Plantilla */}
+              <div className="flex items-start gap-3 p-4 rounded-xl bg-blue-50 border border-blue-100">
+                <FileText size={16} className="text-blue-600 mt-0.5 shrink-0" />
+                <div className="flex-1 text-sm text-blue-800">
+                  <p className="font-medium mb-1">Formato del CSV</p>
+                  <code className="text-xs bg-blue-100 px-2 py-0.5 rounded">
+                    nombre, correo, rol, codigo_area
+                  </code>
+                  <p className="mt-1 text-blue-600 text-xs">
+                    Las columnas <em>rol</em> y <em>codigo_area</em> son opcionales — si están vacías se usan los valores por defecto de abajo.
+                  </p>
+                </div>
+                <button
+                  onClick={downloadTemplate}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 bg-white border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors shrink-0"
+                >
+                  <Download size={13} /> Plantilla
+                </button>
+              </div>
+
+              {/* Archivo */}
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1.5">Archivo CSV *</label>
+                <div
+                  onClick={() => fileRef.current?.click()}
+                  className={`flex flex-col items-center justify-center gap-2 p-6 border-2 border-dashed rounded-xl cursor-pointer transition-colors ${
+                    file ? "border-blue-300 bg-blue-50" : "border-gray-200 hover:border-blue-300 hover:bg-gray-50"
+                  }`}
+                >
+                  <Upload size={20} className={file ? "text-blue-500" : "text-gray-400"} />
+                  {file ? (
+                    <div className="text-center">
+                      <p className="text-sm font-medium text-blue-700">{file.name}</p>
+                      <p className="text-xs text-gray-400">{(file.size / 1024).toFixed(1)} KB</p>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-gray-400">Arrastra o haz clic para seleccionar</p>
+                  )}
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="hidden"
+                    onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                  />
+                </div>
+              </div>
+
+              {/* Defaults */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1.5">Rol por defecto</label>
+                  <select
+                    value={defaultRole}
+                    onChange={(e) => setDefaultRole(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    {ROLES.map((r) => (
+                      <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-400 mt-1">Se aplica si la columna "rol" está vacía en el CSV</p>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1.5">Área por defecto</label>
+                  <select
+                    value={defaultAreaId}
+                    onChange={(e) => setDefaultAreaId(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">— Sin área —</option>
+                    {areas.map((a) => (
+                      <option key={a.id} value={a.id}>{a.name}</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-400 mt-1">Se aplica si la columna "codigo_area" está vacía</p>
+                </div>
+              </div>
+
+              {error && (
+                <div className="flex items-center gap-2 p-3 rounded-lg bg-red-50 border border-red-100 text-sm text-red-700">
+                  <AlertCircle size={15} className="shrink-0" />
+                  {error}
+                </div>
+              )}
+            </div>
+          ) : (
+            /* Resultado */
+            <div className="p-6 space-y-4">
+              {/* Resumen */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="text-center p-3 rounded-xl bg-green-50 border border-green-100">
+                  <p className="text-2xl font-bold text-green-700">{result.created}</p>
+                  <p className="text-xs text-green-600">creados</p>
+                </div>
+                <div className="text-center p-3 rounded-xl bg-yellow-50 border border-yellow-100">
+                  <p className="text-2xl font-bold text-yellow-700">{result.skipped}</p>
+                  <p className="text-xs text-yellow-600">omitidos (ya existen)</p>
+                </div>
+                <div className="text-center p-3 rounded-xl bg-red-50 border border-red-100">
+                  <p className="text-2xl font-bold text-red-700">{result.errors.length}</p>
+                  <p className="text-xs text-red-600">errores</p>
+                </div>
+              </div>
+
+              {result.errors.length > 0 && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-100">
+                  <p className="text-xs font-medium text-red-700 mb-1">Errores:</p>
+                  {result.errors.map((e, i) => (
+                    <p key={i} className="text-xs text-red-600">{e}</p>
+                  ))}
+                </div>
+              )}
+
+              {result.users.length > 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-sm font-medium text-gray-700 flex items-center gap-1.5">
+                      <CheckCircle2 size={14} className="text-green-600" />
+                      Credenciales generadas ({result.users.length})
+                    </p>
+                    <button
+                      onClick={downloadCredentials}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+                    >
+                      <Download size={13} /> Descargar CSV
+                    </button>
+                  </div>
+                  <div className="border border-gray-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-50 border-b border-gray-100">
+                        <tr>
+                          <th className="text-left px-3 py-2 font-medium text-gray-500">Nombre</th>
+                          <th className="text-left px-3 py-2 font-medium text-gray-500">Correo</th>
+                          <th className="text-left px-3 py-2 font-medium text-gray-500">Rol</th>
+                          <th className="text-left px-3 py-2 font-medium text-gray-500">Área</th>
+                          <th className="text-left px-3 py-2 font-medium text-gray-500">Contraseña</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {result.users.map((u, i) => (
+                          <tr key={i} className="hover:bg-gray-50">
+                            <td className="px-3 py-2 text-gray-800 font-medium">{u.name}</td>
+                            <td className="px-3 py-2 text-gray-500">{u.email}</td>
+                            <td className="px-3 py-2">
+                              <span className={`px-1.5 py-0.5 rounded text-xs ${ROLE_COLORS[u.role] ?? "bg-gray-100 text-gray-600"}`}>
+                                {ROLE_LABELS[u.role] ?? u.role}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-gray-500">{u.area}</td>
+                            <td className="px-3 py-2 font-mono text-gray-800 select-all">{u.password}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="text-xs text-orange-600 mt-2 flex items-center gap-1">
+                    <AlertCircle size={12} />
+                    Guarda o descarga estas contraseñas ahora — no se podrán recuperar después.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-100 shrink-0">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-100 transition-colors"
+          >
+            {result ? "Cerrar" : "Cancelar"}
+          </button>
+          {!result && (
+            <button
+              onClick={handleImport}
+              disabled={loading || !file}
+              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors disabled:opacity-50"
+            >
+              {loading ? (
+                <><div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> Importando...</>
+              ) : (
+                <><Upload size={14} /> Importar usuarios</>
+              )}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function AdminUsers() {
   const isAdmin = useIsAdmin();
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebounce(search, 300);
   const queryClient = useQueryClient();
   const [createModal, setCreateModal] = useState(false);
+  const [importModal, setImportModal] = useState(false);
   const [editUser, setEditUser] = useState<User | null>(null);
   const [mutationError, setMutationError] = useState("");
 
@@ -366,6 +655,13 @@ export function AdminUsers() {
         </div>
         <div className="flex items-center gap-3">
           <span className="text-sm text-gray-400">{users.length} usuarios</span>
+          <button
+            onClick={() => setImportModal(true)}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-gray-700 bg-white border border-gray-200 hover:bg-gray-50 transition-colors"
+          >
+            <Upload size={16} />
+            Importar CSV
+          </button>
           <button
             onClick={() => { setMutationError(""); setCreateModal(true); }}
             className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-colors"
@@ -461,6 +757,17 @@ export function AdminUsers() {
           </table>
         )}
       </div>
+
+      {importModal && (
+        <CsvImportModal
+          areas={areas}
+          onClose={() => {
+            setImportModal(false);
+            queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+            queryClient.invalidateQueries({ queryKey: ["admin-dashboard"] });
+          }}
+        />
+      )}
 
       {createModal && (
         <UserCreateModal
