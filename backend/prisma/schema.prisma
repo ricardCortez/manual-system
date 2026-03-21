@@ -217,6 +217,7 @@ model User {
   accessPermissions  AccessPermission[]
   approvalSteps      ApprovalStep[]        @relation("StepReviewer")
   readConfirmations  ReadConfirmation[]
+  videoViews         VideoView[]
   auditLogs          AuditLog[]
   notifications      Notification[]
   favorites          UserFavorite[]
@@ -318,6 +319,7 @@ model Document {
   accessPermissions AccessPermission[]
   approvalFlows     ApprovalFlow[]
   readConfirmations ReadConfirmation[]
+  videoViews        VideoView[]
   favorites         UserFavorite[]
   recentViews       UserRecentDocument[]
   aiSummaries       AISummary[]
@@ -600,6 +602,26 @@ model ReadConfirmation {
 
   @@unique([userId, documentVersionId])
   @@map("read_confirmations")
+}
+
+// ──────────────────────────────────────────────────────
+// CONTROL DE VISIONADO DE VIDEOS
+// ──────────────────────────────────────────────────────
+
+model VideoView {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id])
+
+  watchedPercent Int       @default(0) // máximo % alcanzado (0-100)
+  completedAt    DateTime? // primera vez que llegó al 85%+
+  watchCount     Int       @default(1) // cantidad de veces abierto
+  lastWatchedAt  DateTime  @default(now())
+
+  @@unique([userId, documentId])
+  @@map("video_views")
 }
 
 // ──────────────────────────────────────────────────────

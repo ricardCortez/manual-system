@@ -849,4 +849,57 @@ export async function documentRoutes(app: FastifyInstance) {
 
     return reply.status(201).send({ hash, confirmedAt: new Date() });
   });
+
+  // ── POST /api/v1/documents/:id/video-view ─────────────
+  // Registra o actualiza el progreso de visionado de un video
+  app.post<{ Params: { id: string } }>("/:id/video-view", async (request, reply) => {
+    const { id } = request.params;
+    const { percent } = request.body as { percent: number };
+    const userId = request.user.id;
+
+    const clampedPercent = Math.min(100, Math.max(0, Math.round(percent)));
+    const COMPLETION_THRESHOLD = 85;
+
+    const existing = await prisma.videoView.findUnique({
+      where: { userId_documentId: { userId, documentId: id } },
+    });
+
+    const isNowCompleted = clampedPercent >= COMPLETION_THRESHOLD;
+    const wasCompleted = !!existing?.completedAt;
+
+    await prisma.videoView.upsert({
+      where: { userId_documentId: { userId, documentId: id } },
+      create: {
+        userId,
+        documentId: id,
+        watchedPercent: clampedPercent,
+        completedAt: isNowCompleted ? new Date() : null,
+        watchCount: 1,
+        lastWatchedAt: new Date(),
+      },
+      update: {
+        watchedPercent: Math.max(existing?.watchedPercent ?? 0, clampedPercent),
+        completedAt: wasCompleted ? undefined : isNowCompleted ? new Date() : undefined,
+        watchCount: { increment: 0 }, // no incrementar en cada timeupdate
+        lastWatchedAt: new Date(),
+      },
+    });
+
+    return reply.status(200).send({ percent: clampedPercent, completed: isNowCompleted });
+  });
+
+  // ── POST /api/v1/documents/:id/video-open ─────────────
+  // Incrementa watchCount cuando el usuario abre el video
+  app.post<{ Params: { id: string } }>("/:id/video-open", async (request, reply) => {
+    const { id } = request.params;
+    const userId = request.user.id;
+
+    await prisma.videoView.upsert({
+      where: { userId_documentId: { userId, documentId: id } },
+      create: { userId, documentId: id, watchedPercent: 0, watchCount: 1, lastWatchedAt: new Date() },
+      update: { watchCount: { increment: 1 }, lastWatchedAt: new Date() },
+    });
+
+    return reply.status(200).send({ ok: true });
+  });
 }

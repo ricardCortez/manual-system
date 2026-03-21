@@ -486,6 +486,132 @@ export async function adminRoutes(app: FastifyInstance) {
     }
   );
 
+  // ── GET /api/v1/admin/video-control ─────────────────
+  // Lista videos con estadísticas de visionado completado (≥85%)
+  app.get("/video-control", async () => {
+    const [videos, totalActiveUsers] = await Promise.all([
+      prisma.document.findMany({
+        where: { isDeleted: false, type: "VIDEO" },
+        select: {
+          id: true,
+          title: true,
+          status: true,
+          createdAt: true,
+          area: { select: { id: true, name: true } },
+          _count: { select: { videoViews: true } },
+          versions: {
+            take: 1,
+            orderBy: { createdAt: "desc" },
+            select: {
+              videoAsset: {
+                select: { duration: true, processingStatus: true, thumbnailPath: true },
+              },
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.user.count({ where: { deletedAt: null, isActive: true } }),
+    ]);
+
+    // completedCount = views donde completedAt IS NOT NULL
+    const completedCounts = await prisma.videoView.groupBy({
+      by: ["documentId"],
+      where: { completedAt: { not: null } },
+      _count: { _all: true },
+    });
+    const completedMap = new Map<string, number>(
+      completedCounts.map((r) => [r.documentId as string, r._count._all as number])
+    );
+
+    return videos.map((doc) => {
+      const completed = completedMap.get(doc.id as string) ?? 0;
+      return {
+        id: doc.id,
+        title: doc.title,
+        status: doc.status,
+        createdAt: doc.createdAt,
+        area: doc.area,
+        duration: doc.versions[0]?.videoAsset?.duration ?? null,
+        processingStatus: doc.versions[0]?.videoAsset?.processingStatus ?? null,
+        thumbnailPath: doc.versions[0]?.videoAsset?.thumbnailPath ?? null,
+        viewCount: doc._count.videoViews,
+        completedCount: completed,
+        totalUsers: totalActiveUsers,
+        pendingCount: Math.max(0, totalActiveUsers - completed),
+        completedPercent: totalActiveUsers > 0 ? Math.round((completed / totalActiveUsers) * 100) : 0,
+      };
+    });
+  });
+
+  // ── GET /api/v1/admin/video-control/:docId/users ─────
+  // Retorna estado de visionado por usuario para un video
+  app.get<{ Params: { docId: string } }>(
+    "/video-control/:docId/users",
+    async (request) => {
+      const { docId } = request.params;
+      const { areaId, status } = request.query as {
+        areaId?: string;
+        status?: "completed" | "pending";
+      };
+
+      const [document, users, views] = await Promise.all([
+        prisma.document.findUnique({
+          where: { id: docId },
+          select: {
+            id: true, title: true, status: true,
+            versions: {
+              take: 1,
+              orderBy: { createdAt: "desc" },
+              select: { videoAsset: { select: { duration: true } } },
+            },
+          },
+        }),
+        prisma.user.findMany({
+          where: { deletedAt: null, isActive: true, ...(areaId && { areaId }) },
+          select: {
+            id: true, name: true, email: true, role: true, jobTitle: true,
+            area: { select: { id: true, name: true } },
+          },
+          orderBy: { name: "asc" },
+        }),
+        prisma.videoView.findMany({
+          where: { documentId: docId },
+          select: { userId: true, watchedPercent: true, completedAt: true, watchCount: true, lastWatchedAt: true },
+        }),
+      ]);
+
+      type ViewEntry = { userId: string; watchedPercent: number; completedAt: Date | null; watchCount: number; lastWatchedAt: Date };
+      const viewMap = new Map<string, ViewEntry>(views.map((v: ViewEntry) => [v.userId, v]));
+
+      const result = users
+        .map((u: typeof users[number]) => {
+          const view = viewMap.get(u.id);
+          return {
+            ...u,
+            hasCompleted: !!view?.completedAt,
+            watchedPercent: view?.watchedPercent ?? 0,
+            completedAt: view?.completedAt ?? null,
+            watchCount: view?.watchCount ?? 0,
+            lastWatchedAt: view?.lastWatchedAt ?? null,
+          };
+        })
+        .filter((u) => {
+          if (status === "completed") return u.hasCompleted;
+          if (status === "pending") return !u.hasCompleted;
+          return true;
+        });
+
+      return {
+        document: {
+          ...document,
+          duration: document?.versions[0]?.videoAsset?.duration ?? null,
+        },
+        users: result,
+      };
+    }
+  );
+
   // ── GET /api/v1/admin/ai-usage ───────────────────────
   app.get("/ai-usage", async (request) => {
     const { from, to, userId } = request.query as { from?: string; to?: string; userId?: string };

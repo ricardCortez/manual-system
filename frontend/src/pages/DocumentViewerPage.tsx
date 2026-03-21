@@ -296,6 +296,7 @@ export function DocumentViewerPage() {
                 transcriptSegments={currentVersion.videoAsset.transcript?.segments}
                 vttUrl={currentVersion.videoAsset.transcript?.vttPath ? `/uploads/${currentVersion.videoAsset.transcript.vttPath}` : undefined}
                 title={document.title}
+                documentId={id}
               />
             ) : (
               <div

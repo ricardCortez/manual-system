@@ -2,7 +2,7 @@ import { NavLink, useLocation } from "react-router-dom";
 import {
   BookOpen, Video, Search, LayoutDashboard, Users, Settings,
   ChevronLeft, ChevronRight, Bell, LogOut, Moon, Sun, FolderTree,
-  Activity, Sparkles, ClipboardList,
+  Activity, Sparkles, ClipboardList, PlayCircle,
 } from "lucide-react";
 import { useAuthStore, useIsAdmin } from "@/stores/auth.store";
 import { useUIStore } from "@/stores/ui.store";
@@ -21,6 +21,7 @@ const adminItems = [
   { to: "/admin/usuarios", icon: Users, label: "Usuarios" },
   { to: "/admin/areas", icon: FolderTree, label: "Áreas" },
   { to: "/admin/control-lectura", icon: ClipboardList, label: "Control de Lectura" },
+  { to: "/admin/control-videos", icon: PlayCircle, label: "Control de Videos" },
   { to: "/admin/configuracion", icon: Settings, label: "Configuración" },
 ];
 

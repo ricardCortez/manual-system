@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import videojs from "video.js";
 import "video.js/dist/video-js.css";
 import { Search, ChevronDown, BookOpen } from "lucide-react";
+import api from "@/lib/api";
 
 interface VideoChapter {
   id: string;
@@ -23,6 +24,7 @@ interface VideoPlayerProps {
   transcriptSegments?: TranscriptSegment[];
   vttUrl?: string;
   title?: string;
+  documentId?: string; // para tracking de visionado
 }
 
 export function VideoPlayer({
@@ -32,6 +34,7 @@ export function VideoPlayer({
   transcriptSegments = [],
   vttUrl,
   title,
+  documentId,
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<ReturnType<typeof videojs> | null>(null);
@@ -40,6 +43,22 @@ export function VideoPlayer({
   const [activeSegment, setActiveSegment] = useState<number | null>(null);
   const [transcriptOpen, setTranscriptOpen] = useState(true);
   const [chaptersOpen, setChaptersOpen] = useState(true);
+
+  // Tracking de visionado
+  const maxPercentRef = useRef(0);
+  const completedSentRef = useRef(false);
+  const COMPLETION_THRESHOLD = 85;
+
+  const sendProgress = useCallback((percent: number) => {
+    if (!documentId) return;
+    api.post(`/documents/${documentId}/video-view`, { percent }).catch(() => null);
+  }, [documentId]);
+
+  // Registrar apertura del video
+  useEffect(() => {
+    if (!documentId) return;
+    api.post(`/documents/${documentId}/video-open`).catch(() => null);
+  }, [documentId]);
 
   // ── Inicializar Video.js ───────────────────────────
   useEffect(() => {
@@ -77,14 +96,28 @@ export function VideoPlayer({
       if (e.code === "KeyF") player.isFullscreen() ? player.exitFullscreen() : player.requestFullscreen();
     });
 
-    // Actualizar tiempo para sincronizar transcript y capítulos
+    // Actualizar tiempo para sincronizar transcript, capítulos y tracking
     player.on("timeupdate", () => {
       const time = player.currentTime() || 0;
+      const duration = player.duration() || 0;
       setCurrentTime(time);
 
       // Segmento activo
       const idx = transcriptSegments.findIndex((s) => time >= s.start && time <= s.end);
       setActiveSegment(idx >= 0 ? idx : null);
+
+      // Tracking de visionado
+      if (documentId && duration > 0) {
+        const percent = Math.round((time / duration) * 100);
+        if (percent > maxPercentRef.current) {
+          maxPercentRef.current = percent;
+          // Enviar al backend cada 10% y al alcanzar el umbral por primera vez
+          if (percent % 10 === 0 || (percent >= COMPLETION_THRESHOLD && !completedSentRef.current)) {
+            if (percent >= COMPLETION_THRESHOLD) completedSentRef.current = true;
+            sendProgress(percent);
+          }
+        }
+      }
     });
 
     playerRef.current = player;
